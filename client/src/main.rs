@@ -1,13 +1,13 @@
 use std::net::UdpSocket;
 
 const MAX_LEN: usize = 25;
-const ADDR: &str = "127.0.0.1:12444";
-const REMOTE_ADDR: &str = "127.0.0.1:34254";
+const ADDR: &str = "0.0.0.0:12444";
+const REMOTE_ADDR: &str = "20.82.177.124:34343";
 
 fn main() -> std::io::Result<()> {
     let socket = UdpSocket::bind(ADDR)?;
     let buf = [0; 1];
-    socket.send_to(&buf, REMOTE_ADDR)?;
+    socket.send_to(&buf,  REMOTE_ADDR)?;
     let mut buf = [0; MAX_LEN];
     let mapped_address = loop {
         let (amnt, src) = socket.recv_from(&mut buf)?;

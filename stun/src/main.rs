@@ -1,7 +1,7 @@
 use std::net::UdpSocket;
 
 const MAX_LEN: usize = 25;
-const ADDR: &str = "127.0.0.1:34254";
+const ADDR: &str = "0.0.0.0:34343";
 
 fn main() -> std::io::Result<()> {
     let socket = UdpSocket::bind(ADDR)?;
