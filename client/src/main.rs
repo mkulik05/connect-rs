@@ -1,29 +1,27 @@
-use crate::thread::sleep;
 use anyhow;
-use std::env::remove_var;
-use std::net::UdpSocket;
 use std::process::{Command};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::RecvTimeoutError;
-use std::sync::{Arc};
-use std::time::Duration;
-use std::{thread};
 use stun_client::*;
+use port_scanner::local_port_available;
 
-const PORT: i32 = 38381;
-const ADDR: &str = "0.0.0.0:38381";
+const LOCAL_ADDR: &str = "0.0.0.0";
 const STUN_ADDR: &str = "stun.1und1.de:3478";
 
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
+    let port = match get_unused_port() {
+        Some(port) => port,
+        None => panic!("No free ports available")
+    };
+    println!("Working with port {}\n", port);
+
     let mapped_address = loop {
         println!("Geting mapped address");
-        match get_mapped_addr(STUN_ADDR).await {
+        match get_mapped_addr(LOCAL_ADDR, port).await {
             Ok(addr) => break addr,
             Err(e) => eprintln!("{}", e),
         }
     };
-    println!("Mapped address: {}", mapped_address);
+    println!("Mapped address: {}\n", mapped_address);
 
     let peer_address = get_remote_address().unwrap();
     println!("Remote address: {}", &peer_address);
@@ -33,7 +31,6 @@ async fn main() -> std::io::Result<()> {
         .arg("genkey")
         .output()
         .unwrap();
-    // let private_key = private_key_gen.stdout;
     let private_key = String::from_utf8(private_key_gen.stdout)
         .unwrap()
         .trim()
@@ -88,7 +85,7 @@ async fn main() -> std::io::Result<()> {
         .arg("-c")
         .arg(format!(
             "wg set {} listen-port {} private-key {}",
-            &remote_username, PORT, "/tmp/connect-wg-key.key"
+            &remote_username, port, "/tmp/connect-wg-key.key"
         ))
         .output()
         .unwrap();
@@ -113,54 +110,13 @@ async fn main() -> std::io::Result<()> {
     Ok(())
 }
 
-fn test_connection(socket: UdpSocket, addr: &String) {
-    let socket2 = socket.try_clone().expect("Can't clone udp socket");
-    let buf = [0; 1];
-    let str_addr = (*addr).clone();
-    thread::spawn(move || {
-        let mut buf = [0; 256];
-        loop {
-            let (amnt, src) = socket2.recv_from(&mut buf).unwrap();
-            if src.to_string() == str_addr {
-                let data_bytes = &buf[..amnt];
-                println!("{}", std::str::from_utf8(data_bytes).expect("Bad msg"));
-            }
+fn get_unused_port() -> Option<u16> {
+    for port in 20000..27000 {
+        if local_port_available(port) {
+            return Some(port)
         }
-    });
-    loop {
-        println!("> ");
-        let mut buf = String::new();
-        std::io::stdin().read_line(&mut buf).unwrap();
-        socket.send_to(&buf.into_bytes(), addr).unwrap();
-        println!("Sent");
-    }
-}
-
-async fn punch(socket: UdpSocket, addr: &String) -> std::io::Result<()> {
-    let socket2 = socket.try_clone().expect("Can't clone udp socket");
-    let was_punched = Arc::new(AtomicBool::new(false));
-    let mut buf = [0; 1];
-    let str_addr = (*addr).clone();
-    {
-        let was_punched = was_punched.clone();
-        tokio::spawn(async move {
-            loop {
-                let (_, src) = socket2.recv_from(&mut buf).unwrap();
-                if src.to_string() == str_addr {
-                    was_punched.store(true, Ordering::SeqCst);
-                    break;
-                }
-            }
-        })
-    };
-    loop {
-        socket.send_to(&buf, addr).unwrap();
-        sleep(Duration::from_millis(200));
-        if was_punched.load(Ordering::SeqCst) {
-            break;
-        }
-    }
-    Ok(())
+    } 
+    None
 }
 
 fn get_remote_address() -> std::io::Result<String> {
@@ -177,8 +133,8 @@ fn read_str_from_cli(msg: String) -> String {
     input.trim().to_string()
 }
 
-async fn get_mapped_addr(stun_addr: &str) -> Result<String, anyhow::Error> {
-    let mut client = Client::new(ADDR, None).await?;
+async fn get_mapped_addr(addr: &str, port: u16) -> Result<String, anyhow::Error> {
+    let mut client = Client::new(format!("{}:{}", addr, port), None).await?;
     let res = client.binding_request(STUN_ADDR, None).await?;
     let class = res.get_class();
     if class != Class::SuccessResponse {
