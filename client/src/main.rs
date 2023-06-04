@@ -1,39 +1,115 @@
-use std::net::UdpSocket;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
-use std::{thread, time};
-use std::time::Duration;
 use crate::thread::sleep;
+use anyhow;
+use std::env::remove_var;
+use std::net::UdpSocket;
+use std::process::{Command};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::RecvTimeoutError;
+use std::sync::{Arc};
+use std::time::Duration;
+use std::{thread};
+use stun_client::*;
 
-const MAX_LEN: usize = 25;
-const ADDR: &str = "0.0.0.0:12444";
-const STUN_ADDR: &str = "20.82.177.124:34343";
+const PORT: i32 = 38381;
+const ADDR: &str = "0.0.0.0:38381";
+const STUN_ADDR: &str = "stun.1und1.de:3478";
 
-fn main() -> std::io::Result<()> {
-    let socket;
-    match UdpSocket::bind(ADDR) {
-        Ok(s) => socket = s,
-        Err(e) => panic!("{}", e),
-    }
-
+#[tokio::main]
+async fn main() -> std::io::Result<()> {
     let mapped_address = loop {
-        if let Ok(addr) = get_mapped_addr(&socket, STUN_ADDR) {
-            break addr;
+        println!("Geting mapped address");
+        match get_mapped_addr(STUN_ADDR).await {
+            Ok(addr) => break addr,
+            Err(e) => eprintln!("{}", e),
         }
     };
     println!("Mapped address: {}", mapped_address);
+
     let peer_address = get_remote_address().unwrap();
-    println!("Peer address: {}", peer_address);
+    println!("Remote address: {}", &peer_address);
 
-    println!("Starting punching...");
-    punch(
-        socket.try_clone().expect("faiiled cloning socker"),
-        &peer_address,
-    ).unwrap();
-    println!("Finished???");
-    test_connection(socket, &peer_address);
 
-    println!("{}", mapped_address);
+    let private_key_gen = Command::new("wg")
+        .arg("genkey")
+        .output()
+        .unwrap();
+    // let private_key = private_key_gen.stdout;
+    let private_key = String::from_utf8(private_key_gen.stdout)
+        .unwrap()
+        .trim()
+        .to_string();
+    let public_key_gen = Command::new("bash")
+        .arg("-c")
+        .arg(format!("echo {} | wg pubkey", &private_key))
+        .output()
+        .unwrap();
+    let public_key = String::from_utf8(public_key_gen.stdout)
+        .unwrap()
+        .trim()
+        .to_string();
+
+    println!("Public key: {}\nPrivate key: {}", &public_key, &private_key);
+
+    let my_wg_ip = read_str_from_cli(String::from("Input your wg ip"));
+    let remote_wg_ip = read_str_from_cli(String::from("Input remote wg ip"));
+    let remote_username = read_str_from_cli(String::from("Input remote username"));
+    let remote_pub_key = read_str_from_cli(String::from("Input remote public key"));
+
+    println!("Starting wg server... GLHF");
+
+    Command::new("bash")
+        .arg("-c")
+        .arg(format!(
+            "ip link add dev {} type wireguard",
+            &remote_username
+        ))
+        .output()
+        .unwrap();
+
+    Command::new("bash")
+        .arg("-c")
+        .arg(format!("ip addr add {}/24 dev {}", &my_wg_ip, &remote_username))
+        .output()
+        .unwrap();
+
+    Command::new("bash")
+        .arg("-c")
+        .arg(format!("ip link set mtu 1420 up dev {}", &remote_username))
+        .output()
+        .unwrap();
+
+    Command::new("bash")
+        .arg("-c")
+        .arg(format!("echo {} > {}", &private_key, "/tmp/connect-wg-key.key"))
+        .output()
+        .unwrap();
+
+    Command::new("bash")
+        .arg("-c")
+        .arg(format!(
+            "wg set {} listen-port {} private-key {}",
+            &remote_username, PORT, "/tmp/connect-wg-key.key"
+        ))
+        .output()
+        .unwrap();
+
+    Command::new("bash")
+        .arg("-c")
+        .arg(format!("wg set {} peer {} persistent-keepalive 0.5 endpoint {} allowed-ips {}", &remote_username, &remote_pub_key, &peer_address, &remote_wg_ip))
+        .output()
+        .unwrap();
+
+    Command::new("bash")
+        .arg("-c")
+        .arg(format!("ip link set up {}", &remote_username))
+        .output()
+        .unwrap();
+
+    // println!("Finished???");
+    // test_connection(socket, &peer_address);
+
+    // println!("{}", mapped_address);
+
     Ok(())
 }
 
@@ -60,23 +136,18 @@ fn test_connection(socket: UdpSocket, addr: &String) {
     }
 }
 
-fn punch(socket: UdpSocket, addr: &String) -> std::io::Result<()> {
+async fn punch(socket: UdpSocket, addr: &String) -> std::io::Result<()> {
     let socket2 = socket.try_clone().expect("Can't clone udp socket");
-    let was_punched = Arc::new(Mutex::new(AtomicBool::new(false)));
+    let was_punched = Arc::new(AtomicBool::new(false));
     let mut buf = [0; 1];
     let str_addr = (*addr).clone();
-    let check_inp_udp = {
+    {
         let was_punched = was_punched.clone();
-        thread::spawn(move || {
-            let mut got_packets = 0;
+        tokio::spawn(async move {
             loop {
                 let (_, src) = socket2.recv_from(&mut buf).unwrap();
                 if src.to_string() == str_addr {
-                    got_packets += 1
-                }
-                if got_packets >= 10 {
-                    let guard = was_punched.lock().unwrap();
-                    guard.store(true, Ordering::SeqCst);
+                    was_punched.store(true, Ordering::SeqCst);
                     break;
                 }
             }
@@ -85,12 +156,10 @@ fn punch(socket: UdpSocket, addr: &String) -> std::io::Result<()> {
     loop {
         socket.send_to(&buf, addr).unwrap();
         sleep(Duration::from_millis(200));
-        let guard = was_punched.lock().unwrap();
-        if guard.load(Ordering::SeqCst) {
+        if was_punched.load(Ordering::SeqCst) {
             break;
         }
     }
-    check_inp_udp.join().unwrap();
     Ok(())
 }
 
@@ -101,22 +170,24 @@ fn get_remote_address() -> std::io::Result<String> {
     Ok(input.trim().to_string())
 }
 
-fn get_mapped_addr(socket: &UdpSocket, stun_addr: &str) -> std::io::Result<String> {
-    let buf = [0; 1];
-    socket.send_to(&buf, stun_addr)?;
-    let mut buf = [0; MAX_LEN];
-    let mapped_address = loop {
-        let (amnt, src) = socket.recv_from(&mut buf)?;
-        if src.to_string() == stun_addr {
-            let buf = &buf[..amnt];
-            let addr = std::str::from_utf8(buf);
-            match addr {
-                Ok(value) => break value,
-                Err(_) => {
-                    eprintln!("error during result decoding. Bytes: {:?}", buf)
-                }
-            }
-        };
-    };
-    Ok(mapped_address.to_string())
+fn read_str_from_cli(msg: String) -> String {
+    println!("{msg}");
+    let mut input = String::new();
+    std::io::stdin().read_line(&mut input).unwrap();
+    input.trim().to_string()
+}
+
+async fn get_mapped_addr(stun_addr: &str) -> Result<String, anyhow::Error> {
+    let mut client = Client::new(ADDR, None).await?;
+    let res = client.binding_request(STUN_ADDR, None).await?;
+    let class = res.get_class();
+    if class != Class::SuccessResponse {
+        anyhow::bail!("Invalid response class: {:?}", class)
+    }
+
+    if let Some(addr) = Attribute::get_xor_mapped_address(&res) {
+        Ok(addr.to_string())
+    } else {
+        anyhow::bail!("Didn't got mapped address from stun client")
+    }
 }
