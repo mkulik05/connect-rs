@@ -1,16 +1,24 @@
 use anyhow;
+use chrono::prelude::*;
+use nix::unistd::Uid;
 use port_scanner::local_port_available;
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use stun_client::*;
+use surge_ping;
 use tokio::fs;
 use wireguard_keys::{self, Privkey};
-use chrono::prelude::*;
 
 const LOCAL_ADDR: &str = "0.0.0.0";
 const STUN_ADDR: &str = "stun.1und1.de:3478";
 
+
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
+    if !Uid::effective().is_root() {
+        panic!("You must run this executable with root permissions");
+    }
 
     let port = match get_unused_port().await {
         Some(port) => port,
@@ -32,12 +40,11 @@ async fn main() -> std::io::Result<()> {
 
     let private_key = Privkey::generate();
     let public_key = private_key.pubkey();
-    let key_name = format!("/tmp/connect-wg-{}.key", Local::now().format("%Y_%m_%d-%H:%M:%S").to_string());
-    fs::write(
-        &key_name,
-        private_key.to_base64().as_bytes(),
-    )
-    .await?;
+    let key_name = format!(
+        "/tmp/connect-wg-{}.key",
+        Local::now().format("%Y_%m_%d-%H:%M:%S").to_string()
+    );
+    fs::write(&key_name, private_key.to_base64().as_bytes()).await?;
 
     println!(
         "Public key: {}\nPrivate key: {}",
@@ -45,7 +52,7 @@ async fn main() -> std::io::Result<()> {
         &private_key.to_base64()
     );
 
-    let my_wg_ip = read_str_from_cli(String::from("Input your wg ip"));
+    let my_wg_ip: String = read_str_from_cli(String::from("Input your wg ip"));
     let remote_wg_ip = read_str_from_cli(String::from("Input remote wg ip"));
     let remote_username = read_str_from_cli(String::from("Input remote username"));
     let remote_pub_key = read_str_from_cli(String::from("Input remote public key"));
@@ -59,7 +66,7 @@ async fn main() -> std::io::Result<()> {
         &remote_pub_key,
         &peer_address,
         &remote_wg_ip,
-        &key_name
+        &key_name,
     )
     .await
     {
@@ -67,6 +74,33 @@ async fn main() -> std::io::Result<()> {
         Err(e) => eprintln!("Failed with setting up wireguard: {}", e),
     }
 
+    match start_ping(&remote_wg_ip[..], &remote_username).await {
+        Ok(_) => {
+            println!("Stop pinging");
+        }
+        Err(e) => eprintln!("Failed pinging: {}", e),
+    };
+
+    Ok(())
+}
+
+async fn start_ping(remote_wg_ip: &str, remote_username: &str) -> Result<(), anyhow::Error> {
+    let payload = [0; 8];
+    let running = Arc::new(AtomicBool::new(true));
+    let r = running.clone();
+    ctrlc::set_handler(move || {
+        r.store(false, Ordering::SeqCst);
+    })
+    .expect("Error setting Ctrl-C handler");
+
+    println!("Press Ctrl-C to stop");
+    while running.load(Ordering::SeqCst) {
+        let (_packet, duration) = surge_ping::ping(remote_wg_ip.parse()?, &payload).await?;
+        println!("Ping {}: {:.3?}", remote_wg_ip, duration);
+    }
+    run_terminal_command(format!("ip link del {}", &remote_username))
+    .await
+    .unwrap();
     Ok(())
 }
 
@@ -77,7 +111,7 @@ async fn init_wg(
     remote_pub_key: &String,
     peer_address: &String,
     remote_wg_ip: &String,
-    key_name: &String
+    key_name: &String,
 ) -> Result<(), anyhow::Error> {
     run_terminal_command(format!(
         "ip link add dev {} type wireguard",
@@ -98,7 +132,7 @@ async fn init_wg(
     .await?;
 
     run_terminal_command(format!(
-        "wg set {} peer {} persistent-keepalive 0.5 endpoint {} allowed-ips {}",
+        "wg set {} peer {} persistent-keepalive 1 endpoint {} allowed-ips {}",
         &remote_username, &remote_pub_key, &peer_address, &remote_wg_ip
     ))
     .await?;
@@ -115,8 +149,6 @@ async fn run_terminal_command(command: String) -> Result<Vec<u8>, anyhow::Error>
     }
     Ok(output.stdout)
 }
-
-
 
 async fn get_unused_port() -> Option<u16> {
     for port in 20000..27000 {
