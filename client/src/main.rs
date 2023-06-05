@@ -98,7 +98,7 @@ async fn start_ping(remote_wg_ip: &str, remote_username: &str) -> Result<(), any
     while running.load(Ordering::SeqCst) {
         match surge_ping::ping(remote_wg_ip.parse()?, &payload).await {
             Ok((_packet, duration)) => println!("Ping {}: {:.3?}", remote_wg_ip, duration),
-            Err(e) => println!("Error while pinging {}", remote_wg_ip)
+            Err(e) => println!("Error while pinging {}: \n{:?}", remote_wg_ip, e)
         };
         sleep(Duration::from_millis(1000)).await;
     }
