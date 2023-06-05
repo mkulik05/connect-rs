@@ -9,6 +9,7 @@ use stun_client::*;
 use surge_ping;
 use tokio::fs;
 use wireguard_keys::{self, Privkey};
+use tokio::time::{sleep, Duration};
 
 const LOCAL_ADDR: &str = "0.0.0.0";
 const STUN_ADDR: &str = "stun.1und1.de:3478";
@@ -97,6 +98,7 @@ async fn start_ping(remote_wg_ip: &str, remote_username: &str) -> Result<(), any
     while running.load(Ordering::SeqCst) {
         let (_packet, duration) = surge_ping::ping(remote_wg_ip.parse()?, &payload).await?;
         println!("Ping {}: {:.3?}", remote_wg_ip, duration);
+        sleep(Duration::from_millis(1000)).await;
     }
     run_terminal_command(format!("ip link del {}", &remote_username))
     .await
