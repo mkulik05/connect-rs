@@ -96,8 +96,10 @@ async fn start_ping(remote_wg_ip: &str, remote_username: &str) -> Result<(), any
 
     println!("Press Ctrl-C to stop");
     while running.load(Ordering::SeqCst) {
-        let (_packet, duration) = surge_ping::ping(remote_wg_ip.parse()?, &payload).await?;
-        println!("Ping {}: {:.3?}", remote_wg_ip, duration);
+        match surge_ping::ping(remote_wg_ip.parse()?, &payload).await {
+            Ok((_packet, duration)) => println!("Ping {}: {:.3?}", remote_wg_ip, duration),
+            Err(e) => println!("Error while pinging {}", remote_wg_ip)
+        };
         sleep(Duration::from_millis(1000)).await;
     }
     run_terminal_command(format!("ip link del {}", &remote_username))
