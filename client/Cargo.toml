@@ -10,3 +10,4 @@ anyhow = "1.0.71"
 port_scanner = "0.1.5"
 stun-client = "0.1.2"
 tokio = { version = "1.28.2", features = ["full"] }
+wireguard-keys = "0.1.1"

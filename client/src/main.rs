@@ -1,7 +1,13 @@
 use anyhow;
-use std::process::{Command};
-use stun_client::*;
 use port_scanner::local_port_available;
+use std::process::ExitCode;
+use std::{
+    f32::consts::E,
+    process::{Command, ExitStatus, Output},
+};
+use stun_client::*;
+use tokio::fs;
+use wireguard_keys::{self, Privkey};
 
 const LOCAL_ADDR: &str = "0.0.0.0";
 const STUN_ADDR: &str = "stun.1und1.de:3478";
@@ -10,7 +16,7 @@ const STUN_ADDR: &str = "stun.1und1.de:3478";
 async fn main() -> std::io::Result<()> {
     let port = match get_unused_port() {
         Some(port) => port,
-        None => panic!("No free ports available")
+        None => panic!("No free ports available"),
     };
     println!("Working with port {}\n", port);
 
@@ -26,26 +32,19 @@ async fn main() -> std::io::Result<()> {
     let peer_address = get_remote_address().unwrap();
     println!("Remote address: {}", &peer_address);
 
+    let private_key = Privkey::generate();
+    let public_key = private_key.pubkey();
+    fs::write(
+        "/tmp/connect-wg-key.key",
+        private_key.to_base64().as_bytes(),
+    )
+    .await?;
 
-    let private_key_gen = Command::new("wg")
-        .arg("genkey")
-        .output()
-        .unwrap();
-    let private_key = String::from_utf8(private_key_gen.stdout)
-        .unwrap()
-        .trim()
-        .to_string();
-    let public_key_gen = Command::new("bash")
-        .arg("-c")
-        .arg(format!("echo {} | wg pubkey", &private_key))
-        .output()
-        .unwrap();
-    let public_key = String::from_utf8(public_key_gen.stdout)
-        .unwrap()
-        .trim()
-        .to_string();
-
-    println!("Public key: {}\nPrivate key: {}", &public_key, &private_key);
+    println!(
+        "Public key: {}\nPrivate key: {}",
+        &public_key.to_base64(),
+        &private_key.to_base64()
+    );
 
     let my_wg_ip = read_str_from_cli(String::from("Input your wg ip"));
     let remote_wg_ip = read_str_from_cli(String::from("Input remote wg ip"));
@@ -54,68 +53,74 @@ async fn main() -> std::io::Result<()> {
 
     println!("Starting wg server... GLHF");
 
-    Command::new("bash")
-        .arg("-c")
-        .arg(format!(
-            "ip link add dev {} type wireguard",
-            &remote_username
-        ))
-        .output()
-        .unwrap();
-
-    Command::new("bash")
-        .arg("-c")
-        .arg(format!("ip addr add {}/24 dev {}", &my_wg_ip, &remote_username))
-        .output()
-        .unwrap();
-
-    Command::new("bash")
-        .arg("-c")
-        .arg(format!("ip link set mtu 1420 up dev {}", &remote_username))
-        .output()
-        .unwrap();
-
-    Command::new("bash")
-        .arg("-c")
-        .arg(format!("echo {} > {}", &private_key, "/tmp/connect-wg-key.key"))
-        .output()
-        .unwrap();
-
-    Command::new("bash")
-        .arg("-c")
-        .arg(format!(
-            "wg set {} listen-port {} private-key {}",
-            &remote_username, port, "/tmp/connect-wg-key.key"
-        ))
-        .output()
-        .unwrap();
-
-    Command::new("bash")
-        .arg("-c")
-        .arg(format!("wg set {} peer {} persistent-keepalive 0.5 endpoint {} allowed-ips {}", &remote_username, &remote_pub_key, &peer_address, &remote_wg_ip))
-        .output()
-        .unwrap();
-
-    Command::new("bash")
-        .arg("-c")
-        .arg(format!("ip link set up {}", &remote_username))
-        .output()
-        .unwrap();
-
-    // println!("Finished???");
-    // test_connection(socket, &peer_address);
-
-    // println!("{}", mapped_address);
+    match init_wg(
+        &remote_username,
+        &my_wg_ip,
+        port,
+        &remote_pub_key,
+        &peer_address,
+        &remote_wg_ip,
+    )
+    .await
+    {
+        Ok(_) => println!("Setted up wireguard"),
+        Err(e) => eprintln!("Failed with setting up wireguard: {}", e),
+    }
 
     Ok(())
+}
+
+async fn init_wg(
+    remote_username: &String,
+    my_wg_ip: &String,
+    port: u16,
+    remote_pub_key: &String,
+    peer_address: &String,
+    remote_wg_ip: &String,
+) -> Result<(), anyhow::Error> {
+    run_terminal_command(format!(
+        "ip link add dev {} type wireguard",
+        &remote_username
+    ))
+    .await?;
+    run_terminal_command(format!(
+        "ip addr add {}/24 dev {}",
+        &my_wg_ip, &remote_username
+    ))
+    .await?;
+    run_terminal_command(format!("ip link set mtu 1420 up dev {}", &remote_username)).await?;
+
+    run_terminal_command(format!(
+        "wg set {} listen-port {} private-key {}",
+        &remote_username, port, "/tmp/connect-wg-key.key"
+    ))
+    .await?;
+
+    run_terminal_command(format!(
+        "wg set {} peer {} persistent-keepalive 0.5 endpoint {} allowed-ips {}",
+        &remote_username, &remote_pub_key, &peer_address, &remote_wg_ip
+    ))
+    .await?;
+
+    run_terminal_command(format!("ip link set up {}", &remote_username)).await?;
+
+    Ok(())
+}
+
+async fn run_terminal_command(command: String) -> Result<Vec<u8>, anyhow::Error> {
+    let output = Command::new("bash").arg("-c").arg(&command).output()?;
+    if !output.status.success() {
+        anyhow::bail!("Error during commnd execution: \n{}\n{:?}", command, output)
+    }
+    Ok(output.stdout)
 }
 
 fn get_unused_port() -> Option<u16> {
     for port in 20000..27000 {
         if local_port_available(port) {
-            return Some(port)
+            return Some(port);
         }
-    } 
+    }
     None
 }
 
