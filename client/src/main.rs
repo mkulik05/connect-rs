@@ -32,7 +32,7 @@ async fn main() -> std::io::Result<()> {
 
     let private_key = Privkey::generate();
     let public_key = private_key.pubkey();
-    let key_name = format!("/tmp/connect-wg-{}.key", Local::now().format("%Y.%m.%d-%H:%M:%S").to_string());
+    let key_name = format!("/tmp/connect-wg-{}.key", Local::now().format("%Y_%m_%d-%H:%M:%S").to_string());
     fs::write(
         &key_name,
         private_key.to_base64().as_bytes(),
