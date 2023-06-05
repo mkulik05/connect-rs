@@ -1,20 +1,18 @@
 use anyhow;
 use port_scanner::local_port_available;
-use std::process::ExitCode;
-use std::{
-    f32::consts::E,
-    process::{Command, ExitStatus, Output},
-};
+use std::process::Command;
 use stun_client::*;
 use tokio::fs;
 use wireguard_keys::{self, Privkey};
+use chrono::prelude::*;
 
 const LOCAL_ADDR: &str = "0.0.0.0";
 const STUN_ADDR: &str = "stun.1und1.de:3478";
 
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
-    let port = match get_unused_port() {
+
+    let port = match get_unused_port().await {
         Some(port) => port,
         None => panic!("No free ports available"),
     };
@@ -34,8 +32,9 @@ async fn main() -> std::io::Result<()> {
 
     let private_key = Privkey::generate();
     let public_key = private_key.pubkey();
+    let key_name = format!("/tmp/connect-wg-{}.key", Local::now().format("%Y.%m.%d-%H:%M:%S").to_string());
     fs::write(
-        "/tmp/connect-wg-key.key",
+        &key_name,
         private_key.to_base64().as_bytes(),
     )
     .await?;
@@ -60,6 +59,7 @@ async fn main() -> std::io::Result<()> {
         &remote_pub_key,
         &peer_address,
         &remote_wg_ip,
+        &key_name
     )
     .await
     {
@@ -77,6 +77,7 @@ async fn init_wg(
     remote_pub_key: &String,
     peer_address: &String,
     remote_wg_ip: &String,
+    key_name: &String
 ) -> Result<(), anyhow::Error> {
     run_terminal_command(format!(
         "ip link add dev {} type wireguard",
@@ -92,7 +93,7 @@ async fn init_wg(
 
     run_terminal_command(format!(
         "wg set {} listen-port {} private-key {}",
-        &remote_username, port, "/tmp/connect-wg-key.key"
+        &remote_username, port, key_name
     ))
     .await?;
 
@@ -115,7 +116,9 @@ async fn run_terminal_command(command: String) -> Result<Vec<u8>, anyhow::Error>
     Ok(output.stdout)
 }
 
-fn get_unused_port() -> Option<u16> {
+
+
+async fn get_unused_port() -> Option<u16> {
     for port in 20000..27000 {
         if local_port_available(port) {
             return Some(port);
