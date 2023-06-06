@@ -2,18 +2,43 @@ use anyhow;
 use chrono::prelude::*;
 use nix::unistd::Uid;
 use port_scanner::local_port_available;
+use serde::{Deserialize, Serialize};
+use serde_json;
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use stun_client::*;
 use surge_ping;
 use tokio::fs;
-use wireguard_keys::{self, Privkey};
+use tokio::sync::oneshot;
 use tokio::time::{sleep, Duration};
+use websockets::{self, Frame};
+use wireguard_keys::{self, Privkey};
 
 const LOCAL_ADDR: &str = "0.0.0.0";
 const STUN_ADDR: &str = "stun.1und1.de:3478";
+const WS_ADDR: &str = "ws.1und1.de:3478";
 
+#[derive(Serialize, Deserialize, Debug)]
+
+enum WsMessage {
+    WgIpMsg(String),
+    JoinReqMsg(JoinReq),
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct JoinReq {
+    room_id: String,
+    peer_info: PeerInfo,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct PeerInfo {
+    wg_ip: String,
+    pub_key: String,
+    mapped_addr: String,
+    username: String,
+}
 
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
@@ -71,18 +96,70 @@ async fn main() -> std::io::Result<()> {
     )
     .await
     {
-        Ok(_) => println!("Setted up wireguard"),
+        Ok(_) => {
+            println!("Setted up wireguard");
+            match start_ping(&remote_wg_ip[..], &remote_username).await {
+                Ok(_) => {
+                    println!("Stop pinging");
+                }
+                Err(e) => eprintln!("Failed pinging: {}", e),
+            };
+        }
         Err(e) => eprintln!("Failed with setting up wireguard: {}", e),
     }
 
-    match start_ping(&remote_wg_ip[..], &remote_username).await {
-        Ok(_) => {
-            println!("Stop pinging");
-        }
-        Err(e) => eprintln!("Failed pinging: {}", e),
-    };
-
     Ok(())
+}
+
+async fn join_room(
+    id: String,
+    username: String,
+    mapped_addr: String,
+    pub_key: String,
+) -> Result<String, anyhow::Error> {
+    let mut builder = websockets::WebSocket::builder();
+    let ws = builder.connect(WS_ADDR).await.unwrap();
+    let data = PeerInfo {
+        wg_ip: "".to_string(),
+        pub_key,
+        mapped_addr,
+        username,
+    };
+    let data = JoinReq {
+        room_id: id,
+        peer_info: data,
+    };
+    let data = serde_json::to_string(&data).unwrap();
+    let (mut ws_read, mut ws_write) = ws.split();
+    ws_write.send_text(data).await.unwrap();
+
+    let (sender, receiver) = oneshot::channel();
+    tokio::spawn(async move {
+        let mut sender = Some(sender);
+        while let Ok(msg) = ws_read.receive().await {
+            match msg {
+                Frame::Text { payload, .. } => {
+                    let data: WsMessage = serde_json::from_str(&payload[..]).unwrap();
+                    match data {
+                        WsMessage::WgIpMsg(ip) => {
+                            if sender.is_some() {
+                                if let Err(_) = sender.unwrap().send(ip) {
+                                    println!("the receiver dropped");
+                                }
+                                sender = None;
+                            }
+                        }
+                        WsMessage::JoinReqMsg(join_req) => if sender.is_none() {},
+                    }
+                }
+                _ => {}
+            }
+        }
+    });
+    if let Ok(wg_ip) = receiver.await {
+        return Ok(wg_ip);
+    }
+    anyhow::bail!("Didn't receive message with wg ip")
 }
 
 async fn start_ping(remote_wg_ip: &str, remote_username: &str) -> Result<(), anyhow::Error> {
@@ -98,24 +175,24 @@ async fn start_ping(remote_wg_ip: &str, remote_username: &str) -> Result<(), any
     while running.load(Ordering::SeqCst) {
         match surge_ping::ping(remote_wg_ip.parse()?, &payload).await {
             Ok((_packet, duration)) => println!("Ping {}: {:.3?}", remote_wg_ip, duration),
-            Err(e) => println!("Error while pinging {}: \n{:?}", remote_wg_ip, e)
+            Err(e) => println!("Error while pinging {}: \n{:?}", remote_wg_ip, e),
         };
         sleep(Duration::from_millis(1000)).await;
     }
     run_terminal_command(format!("ip link del {}", &remote_username))
-    .await
-    .unwrap();
+        .await
+        .unwrap();
     Ok(())
 }
 
 async fn init_wg(
-    remote_username: &String,
-    my_wg_ip: &String,
+    remote_username: &str,
+    my_wg_ip: &str,
     port: u16,
-    remote_pub_key: &String,
-    peer_address: &String,
-    remote_wg_ip: &String,
-    key_name: &String,
+    remote_pub_key: &str,
+    peer_address: &str,
+    remote_wg_ip: &str,
+    key_name: &str,
 ) -> Result<(), anyhow::Error> {
     run_terminal_command(format!(
         "ip link add dev {} type wireguard",
