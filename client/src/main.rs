@@ -2,6 +2,7 @@ use anyhow;
 use chrono::prelude::*;
 use nix::unistd::Uid;
 use port_scanner::local_port_available;
+use redis::Commands;
 use serde::{Deserialize, Serialize};
 use serde_json;
 use std::process::Command;
@@ -14,10 +15,13 @@ use tokio::sync::oneshot;
 use tokio::time::{sleep, Duration};
 use websockets::{self, Frame};
 use wireguard_keys::{self, Privkey};
+extern crate redis;
+use redis::RedisError;
 
 const LOCAL_ADDR: &str = "0.0.0.0";
 const STUN_ADDR: &str = "stun.1und1.de:3478";
-const WS_ADDR: &str = "ws.1und1.de:3478";
+const WS_ADDR: &str = "wss://server.mishakulik2.workers.dev/";
+const REDIS_URL: &str = "rediss://client:08794a557c35bd6449abc35ed8d3128930daa4600a87a768ca79848ee31760c3@balanced-mastiff-35201.upstash.io:35201";
 
 #[derive(Serialize, Deserialize, Debug)]
 
@@ -61,9 +65,6 @@ async fn main() -> std::io::Result<()> {
     };
     println!("Mapped address: {}\n", mapped_address);
 
-    let peer_address = get_remote_address().unwrap();
-    println!("Remote address: {}", &peer_address);
-
     let private_key = Privkey::generate();
     let public_key = private_key.pubkey();
     let key_name = format!(
@@ -78,47 +79,40 @@ async fn main() -> std::io::Result<()> {
         &private_key.to_base64()
     );
 
-    let my_wg_ip: String = read_str_from_cli(String::from("Input your wg ip"));
-    let remote_wg_ip = read_str_from_cli(String::from("Input remote wg ip"));
-    let remote_username = read_str_from_cli(String::from("Input remote username"));
-    let remote_pub_key = read_str_from_cli(String::from("Input remote public key"));
+    let room_id: String = read_str_from_cli(String::from("Input room id"));
+    let username = read_str_from_cli(String::from("Input your username"));
 
-    println!("Starting wg server... GLHF");
+    println!("Joining room... GLHF");
 
-    match init_wg(
-        &remote_username,
-        &my_wg_ip,
+    match join_room(
+        room_id,
+        username,
+        mapped_address,
+        public_key.to_base64(),
         port,
-        &remote_pub_key,
-        &peer_address,
-        &remote_wg_ip,
-        &key_name,
+        key_name,
     )
     .await
     {
-        Ok(_) => {
-            println!("Setted up wireguard");
-            match start_ping(&remote_wg_ip[..], &remote_username).await {
-                Ok(_) => {
-                    println!("Stop pinging");
-                }
-                Err(e) => eprintln!("Failed pinging: {}", e),
-            };
-        }
-        Err(e) => eprintln!("Failed with setting up wireguard: {}", e),
-    }
+        Ok(_) => println!("Cool"),
+        Err(err) => eprintln!("Joining room failed: {}", err),
+    };
+    loop {
 
+    }
     Ok(())
 }
 
 async fn join_room(
-    id: String,
+    room_id: String,
     username: String,
     mapped_addr: String,
     pub_key: String,
+    port: u16,
+    key_name: String,
 ) -> Result<String, anyhow::Error> {
-    let mut builder = websockets::WebSocket::builder();
-    let ws = builder.connect(WS_ADDR).await.unwrap();
+    let ws = websockets::WebSocket::connect(WS_ADDR).await?;
+    println!("{:?}", &ws);
     let data = PeerInfo {
         wg_ip: "".to_string(),
         pub_key,
@@ -126,35 +120,62 @@ async fn join_room(
         username,
     };
     let data = JoinReq {
-        room_id: id,
+        room_id: room_id.clone(),
         peer_info: data,
     };
+    println!("{:?}", &data);
     let data = serde_json::to_string(&data).unwrap();
     let (mut ws_read, mut ws_write) = ws.split();
+
     ws_write.send_text(data).await.unwrap();
+    println!("sent");
 
     let (sender, receiver) = oneshot::channel();
     tokio::spawn(async move {
         let mut sender = Some(sender);
+        let mut wg_ip = None;
         while let Ok(msg) = ws_read.receive().await {
+            println!("{:?}", &msg);
             match msg {
                 Frame::Text { payload, .. } => {
-                    let data: WsMessage = serde_json::from_str(&payload[..]).unwrap();
-                    match data {
-                        WsMessage::WgIpMsg(ip) => {
-                            if sender.is_some() {
-                                if let Err(_) = sender.unwrap().send(ip) {
-                                    println!("the receiver dropped");
-                                }
-                                sender = None;
+                    println!("whahht {:?}", &payload);
+                    let data: WsMessage = serde_json::from_str(payload.as_str()).unwrap();
+                    if let WsMessage::WgIpMsg(ip) = data {
+                        if sender.is_some() {
+                            if let Err(_) = sender.unwrap().send(ip.clone()) {
+                                println!("the receiver dropped");
+                            } else {
+                                wg_ip = Some(ip);
+                                match wg_connect_to_each(
+                                    &wg_ip.clone().unwrap(),
+                                    &room_id,
+                                    port,
+                                    &key_name,
+                                )
+                                .await
+                                {
+                                    Ok(_) => {
+                                        sub_to_room(
+                                            wg_ip.clone().unwrap(),
+                                            room_id.clone(),
+                                            port,
+                                            key_name.clone(),
+                                        )
+                                        .await;
+                                    }
+                                    Err(e) => {
+                                        eprintln!("Error during connection to other peers: {}", e)
+                                    }
+                                };
                             }
+                            sender = None;
                         }
-                        WsMessage::JoinReqMsg(join_req) => if sender.is_none() {},
                     }
                 }
                 _ => {}
             }
         }
+        println!("Error:");
     });
     if let Ok(wg_ip) = receiver.await {
         return Ok(wg_ip);
@@ -162,26 +183,75 @@ async fn join_room(
     anyhow::bail!("Didn't receive message with wg ip")
 }
 
-async fn start_ping(remote_wg_ip: &str, remote_username: &str) -> Result<(), anyhow::Error> {
-    let payload = [0; 8];
-    let running = Arc::new(AtomicBool::new(true));
-    let r = running.clone();
-    ctrlc::set_handler(move || {
-        r.store(false, Ordering::SeqCst);
-    })
-    .expect("Error setting Ctrl-C handler");
+async fn sub_to_room(wg_ip: String, room_id: String, port: u16, key_name: String) {
+    {
+        let room_id = room_id.clone();
+        tokio::spawn(async move {
+            let client = redis::Client::open(REDIS_URL).unwrap();
+            let mut con = client.get_connection().unwrap();
+            let mut pubsub = con.as_pubsub();
+            pubsub.subscribe(room_id.as_str()).unwrap();
 
-    println!("Press Ctrl-C to stop");
-    while running.load(Ordering::SeqCst) {
-        match surge_ping::ping(remote_wg_ip.parse()?, &payload).await {
-            Ok((_packet, duration)) => println!("Ping {}: {:.3?}", remote_wg_ip, duration),
-            Err(e) => println!("Error while pinging {}: \n{:?}", remote_wg_ip, e),
-        };
-        sleep(Duration::from_millis(1000)).await;
+            loop {
+                let msg = pubsub.get_message().unwrap();
+                let payload: String = msg.get_payload().unwrap();
+                if msg.get_channel_name() == room_id {
+                    let data: WsMessage = serde_json::from_str(payload.as_str()).unwrap();
+                    if let WsMessage::JoinReqMsg(join_req) = data {
+                        println!("{} is trying to join", &join_req.peer_info.username);
+                        if wg_ip != join_req.peer_info.wg_ip {
+                            match init_wg(
+                                &join_req.peer_info.username,
+                                &wg_ip,
+                                port,
+                                &join_req.peer_info.pub_key,
+                                &join_req.peer_info.mapped_addr,
+                                &join_req.peer_info.wg_ip,
+                                &key_name,
+                            )
+                            .await
+                            {
+                                Ok(_) => {
+                                    println!("{} joined", &join_req.peer_info.username);
+                                }
+                                Err(err) => {
+                                    eprintln!("Error during initialising new connection: {}", err)
+                                }
+                            };
+                        }
+                    }
+                }
+                println!("channel '{}': {}", msg.get_channel_name(), payload);
+            }
+        });
     }
-    run_terminal_command(format!("ip link del {}", &remote_username))
-        .await
-        .unwrap();
+}
+
+async fn wg_connect_to_each(
+    wg_ip: &String,
+    room_id: &String,
+    port: u16,
+    key_name: &String,
+) -> Result<(), anyhow::Error> {
+    let client = redis::Client::open(REDIS_URL).unwrap();
+    let mut con = client.get_connection().unwrap();
+    let peers_n: u16 = con.llen(&room_id)?;
+    for i in 0..peers_n {
+        let data: String = con.lindex(&room_id, i as isize)?;
+        let peer_info: PeerInfo = serde_json::from_str(&data[..]).unwrap();
+        if peer_info.wg_ip != *wg_ip {
+            init_wg(
+                peer_info.username.as_str(),
+                &wg_ip,
+                port,
+                peer_info.pub_key.as_str(),
+                peer_info.mapped_addr.as_str(),
+                peer_info.wg_ip.as_str(),
+                &key_name.as_str(),
+            )
+            .await?;
+        }
+    }
     Ok(())
 }
 
@@ -238,13 +308,6 @@ async fn get_unused_port() -> Option<u16> {
         }
     }
     None
-}
-
-fn get_remote_address() -> std::io::Result<String> {
-    println!("Input remote addr:");
-    let mut input = String::new();
-    std::io::stdin().read_line(&mut input)?;
-    Ok(input.trim().to_string())
 }
 
 fn read_str_from_cli(msg: String) -> String {
