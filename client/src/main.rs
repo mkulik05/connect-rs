@@ -1,10 +1,12 @@
 use anyhow;
 use chrono::prelude::*;
 use nix::unistd::Uid;
-use port_scanner::local_port_available;
 use redis::Commands;
 use serde::{Deserialize, Serialize};
 use serde_json;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
+use std::net::TcpListener;
 use std::process::Command;
 use std::sync::Arc;
 use stun_client::*;
@@ -14,8 +16,6 @@ use tokio::sync::oneshot;
 use tokio::time::{sleep, Duration};
 use websockets::{self, Frame};
 use wireguard_keys::{self, Privkey};
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 
 extern crate redis;
 use std::process::ExitCode;
@@ -71,11 +71,13 @@ async fn main() -> ExitCode {
     let private_key = Privkey::generate();
     let key_hash_uid = get_hash(&private_key);
     let public_key = private_key.pubkey();
-    let key_name = Local::now().format("/tmp/connect-wg-%Y_%m_%d_%H_%M_%S.key").to_string();
-    
+    let key_name = Local::now()
+        .format("/tmp/connect-wg-%Y_%m_%d_%H_%M_%S.key")
+        .to_string();
+
     match fs::write(&key_name, private_key.to_base64().as_bytes()).await {
-        Ok(_) => {},
-        Err(e) => eprintln!("Error saving key: {}", e)
+        Ok(_) => {}
+        Err(e) => eprintln!("Error saving key: {}", e),
     };
 
     println!(
@@ -96,17 +98,14 @@ async fn main() -> ExitCode {
         public_key.to_base64(),
         port,
         key_name,
-        key_hash_uid
+        key_hash_uid,
     )
     .await
     {
         Ok(_) => println!("Cool"),
         Err(err) => eprintln!("Joining room failed: {}", err),
     };
-    loop {
-
-    }
-
+    loop {}
 }
 
 fn get_hash<T>(obj: T) -> u64
@@ -118,7 +117,6 @@ where
     hasher.finish()
 }
 
-
 async fn join_room(
     room_id: String,
     username: String,
@@ -126,7 +124,7 @@ async fn join_room(
     pub_key: String,
     port: u16,
     key_name: String,
-    key_hash_uid: u64
+    key_hash_uid: u64,
 ) -> Result<String, anyhow::Error> {
     let ws = websockets::WebSocket::connect(WS_ADDR).await?;
     println!("{:?}", &ws);
@@ -168,7 +166,7 @@ async fn join_room(
                                     &room_id,
                                     port,
                                     &key_name,
-                                    key_hash_uid
+                                    key_hash_uid,
                                 )
                                 .await
                                 {
@@ -178,7 +176,7 @@ async fn join_room(
                                             room_id.clone(),
                                             port,
                                             key_name.clone(),
-                                            key_hash_uid
+                                            key_hash_uid,
                                         )
                                         .await;
                                     }
@@ -202,7 +200,13 @@ async fn join_room(
     anyhow::bail!("Didn't receive message with wg ip")
 }
 
-async fn sub_to_room(wg_ip: String, room_id: String, port: u16, key_name: String, key_hash_uid: u64) {
+async fn sub_to_room(
+    wg_ip: String,
+    room_id: String,
+    port: u16,
+    key_name: String,
+    key_hash_uid: u64,
+) {
     {
         let room_id = room_id.clone();
         tokio::spawn(async move {
@@ -227,7 +231,7 @@ async fn sub_to_room(wg_ip: String, room_id: String, port: u16, key_name: String
                                 &join_req.peer_info.mapped_addr,
                                 &join_req.peer_info.wg_ip,
                                 &key_name,
-                                key_hash_uid
+                                key_hash_uid,
                             )
                             .await
                             {
@@ -252,7 +256,7 @@ async fn wg_connect_to_each(
     room_id: &String,
     port: u16,
     key_name: &String,
-    key_hash_uid: u64
+    key_hash_uid: u64,
 ) -> Result<(), anyhow::Error> {
     let client = redis::Client::open(REDIS_URL).unwrap();
     let mut con = client.get_connection().unwrap();
@@ -269,7 +273,7 @@ async fn wg_connect_to_each(
                 peer_info.mapped_addr.as_str(),
                 peer_info.wg_ip.as_str(),
                 &key_name.as_str(),
-                key_hash_uid
+                key_hash_uid,
             )
             .await?;
         }
@@ -285,19 +289,11 @@ async fn init_wg(
     peer_address: &str,
     remote_wg_ip: &str,
     key_name: &str,
-    key_hash_uid: u64
+    key_hash_uid: u64,
 ) -> Result<(), anyhow::Error> {
-    let res = run_terminal_command(format!(
-        "ip link show {} >/dev/null",
-        &key_hash_uid
-    ))
-    .await?;
+    let res = run_terminal_command(format!("ip link show {} >/dev/null", &key_hash_uid)).await?;
     if res.len() != 0 {
-        run_terminal_command(format!(
-            "ip link add dev {} type wireguard",
-            &key_hash_uid
-        ))
-        .await?;
+        run_terminal_command(format!("ip link add dev {} type wireguard", &key_hash_uid)).await?;
         run_terminal_command(format!("ip link set mtu 1420 up dev {}", &key_hash_uid)).await?;
         run_terminal_command(format!("ip link set up {}", &remote_username)).await?;
     }
@@ -332,8 +328,7 @@ async fn run_terminal_command(command: String) -> Result<Vec<u8>, anyhow::Error>
 
 async fn get_unused_port() -> Option<u16> {
     for port in 20000..27000 {
-        // let a = UDPSocket::new(port);
-        if local_port_available(port) {
+        if let Ok(_) = TcpListener::bind(("localhost", port)) {
             return Some(port);
         }
     }
