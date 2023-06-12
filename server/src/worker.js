@@ -21,12 +21,12 @@ async function handleRequest(request, redis) {
 
         console.log(`[message]: ${event.data}`);
         let data = JSON.parse(event.data);
-        let room_id = data.room_id;
-        let wg_ip = await get_free_wg_id(redis, room_id)
+        let room_name = data.room_name;
+        let wg_ip = await get_free_wg_id(redis, room_name)
         server.send(JSON.stringify({"WgIpMsg" : wg_ip}))
         data.peer_info.wg_ip = wg_ip;
-        await redis.lpush(room_id, JSON.stringify(data.peer_info));
-        await redis.publish(room_id, JSON.stringify({"JoinReqMsg": data})) 
+        await redis.lpush(room_name, JSON.stringify(data.peer_info));
+        await redis.publish(room_name, JSON.stringify({"JoinReqMsg": data})) 
     });
     return new Response(null, {
         status: 101,

@@ -122,6 +122,7 @@ async fn join_room(
         }
     };
     println!("Mapped address: {}\n", mapped_addr);
+
     let ws = websockets::WebSocket::connect(WS_ADDR).await?;
     let data = PeerInfo {
         wg_ip: "".to_string(),
@@ -155,28 +156,38 @@ async fn join_room(
                                 println!("the receiver dropped");
                             } else {
                                 println!("Got socket msg with wg ip");
-                                wg_ip = Some(ip);
-                                match wg_connect_to_each(
-                                    &wg_ip.clone().unwrap(),
-                                    &room_name,
-                                    port,
-                                    &key_name,
-                                    &interface_name,
-                                )
-                                .await
-                                {
+                                wg_ip = Some(ip.clone());
+                                match init_wg(&ip, port, key_name.as_str(), &interface_name).await {
                                     Ok(_) => {
-                                        sub_to_room(
-                                            wg_ip.clone().unwrap(),
-                                            room_name.clone(),
+                                        match wg_connect_to_each(
+                                            &ip,
+                                            &room_name,
                                             port,
-                                            key_name.clone(),
+                                            &key_name,
                                             &interface_name,
                                         )
-                                        .await;
+                                        .await
+                                        {
+                                            Ok(_) => {
+                                                sub_to_room(
+                                                    wg_ip.clone().unwrap(),
+                                                    room_name.clone(),
+                                                    port,
+                                                    key_name.clone(),
+                                                    &interface_name,
+                                                )
+                                                .await;
+                                            }
+                                            Err(e) => {
+                                                eprintln!(
+                                                    "Error during connection to other peers: {}",
+                                                    e
+                                                )
+                                            }
+                                        };
                                     }
                                     Err(e) => {
-                                        eprintln!("Error during connection to other peers: {}", e)
+                                        eprintln!("Error during wireguard initialisation: {}", e);
                                     }
                                 };
                             }
@@ -218,8 +229,7 @@ async fn sub_to_room(
                     if let WsMessage::JoinReqMsg(join_req) = data {
                         println!("{} is trying to join", &join_req.peer_info.username);
                         if wg_ip != join_req.peer_info.wg_ip {
-                            match init_wg(
-                                &join_req.peer_info.username,
+                            match add_wg_peer(
                                 &wg_ip,
                                 port,
                                 &join_req.peer_info.pub_key,
@@ -259,8 +269,7 @@ async fn wg_connect_to_each(
         let data: String = con.lindex(&room_name, i as isize)?;
         let peer_info: PeerInfo = serde_json::from_str(&data[..]).unwrap();
         if peer_info.wg_ip != *wg_ip {
-            init_wg(
-                peer_info.username.as_str(),
+            add_wg_peer(
                 &wg_ip,
                 port,
                 peer_info.pub_key.as_str(),
@@ -276,12 +285,8 @@ async fn wg_connect_to_each(
 }
 
 async fn init_wg(
-    remote_username: &str,
     my_wg_ip: &str,
     port: u16,
-    remote_pub_key: &str,
-    peer_address: &str,
-    remote_wg_ip: &str,
     key_name: &str,
     interface_name: &String,
 ) -> Result<(), anyhow::Error> {
@@ -293,39 +298,51 @@ async fn init_wg(
             false,
         )
         .await?;
-        run_terminal_command(
-            format!("ip addr add {}/24 dev {}", &my_wg_ip, &interface_name),
-            false,
-        )
-        .await?;
-        run_terminal_command(
-            format!("ip link set mtu 1420 up dev {}", &interface_name),
-            false,
-        )
-        .await?;
-
-        run_terminal_command(
-            format!(
-                "wg set {} listen-port {} private-key {}",
-                &interface_name, port, key_name
-            ),
-            false,
-        )
-        .await?;
-
-        run_terminal_command(
-            format!(
-                "wg set {} peer {} persistent-keepalive 1 endpoint {} allowed-ips {}",
-                &interface_name, &GHOST_WG_PUB_KEY, &GHOST_WG_ADDRESS, &GHOST_WG_IP
-            ),
-            false,
-        )
-        .await?;
     }
+    run_terminal_command(
+        format!("ip addr add {}/24 dev {}", &my_wg_ip, &interface_name),
+        false,
+    )
+    .await?;
+    run_terminal_command(
+        format!("ip link set mtu 1420 up dev {}", &interface_name),
+        false,
+    )
+    .await?;
 
     run_terminal_command(
         format!(
-            "wg set {} peer {} persistent-keepalive 5 endpoint {} allowed-ips {}",
+            "wg set {} listen-port {} private-key {}",
+            &interface_name, port, key_name
+        ),
+        false,
+    )
+    .await?;
+
+    run_terminal_command(
+        format!(
+            "wg set {} peer {} persistent-keepalive 1 endpoint {} allowed-ips {}",
+            &interface_name, &GHOST_WG_PUB_KEY, &GHOST_WG_ADDRESS, &GHOST_WG_IP
+        ),
+        false,
+    )
+    .await?;
+    run_terminal_command(format!("ip link set up {}", &interface_name), false).await?;
+    Ok(())
+}
+
+async fn add_wg_peer(
+    my_wg_ip: &str,
+    port: u16,
+    remote_pub_key: &str,
+    peer_address: &str,
+    remote_wg_ip: &str,
+    key_name: &str,
+    interface_name: &String,
+) -> Result<(), anyhow::Error> {
+    run_terminal_command(
+        format!(
+            "wg set {} peer {} persistent-keepalive 1 endpoint {} allowed-ips {}",
             &interface_name, &remote_pub_key, &peer_address, &remote_wg_ip
         ),
         false,
