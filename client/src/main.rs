@@ -1,20 +1,20 @@
 use anyhow;
 use chrono::prelude::*;
 use nix::unistd::Uid;
+use rand::Rng;
 use redis::Commands;
 use serde::{Deserialize, Serialize};
 use serde_json;
 use std::net::TcpListener;
 use std::process::Command;
-use std::sync::Arc;
+// use std::sync::Arc;
 use stun_client::*;
-use surge_ping;
+// use surge_ping;
 use tokio::fs;
 use tokio::sync::oneshot;
-use tokio::time::{sleep, Duration};
+// use tokio::time::{sleep, Duration};
 use websockets::{self, Frame};
 use wireguard_keys::{self, Privkey};
-use rand::Rng;
 
 extern crate redis;
 use std::process::ExitCode;
@@ -23,7 +23,13 @@ const LOCAL_ADDR: &str = "0.0.0.0";
 const STUN_ADDR: &str = "stun.1und1.de:3478";
 const WS_ADDR: &str = "wss://server.mishakulik2.workers.dev/";
 const REDIS_URL: &str = "rediss://client:08794a557c35bd6449abc35ed8d3128930daa4600a87a768ca79848ee31760c3@balanced-mastiff-35201.upstash.io:35201";
+
+const GHOST_WG_IP: &str = "10.9.0.0";
+const GHOST_WG_PUB_KEY: &str = "UvtAsAD2mLgHhSqwTRkwykaNGuh3oiZg5bTwm/zf1Hs=";
+const GHOST_WG_ADDRESS: &str = "1.1.1.1:32322";
+
 const INTERFACE_PREFIX: &str = "cnrs-";
+const MAX_INTERFACE_ROOM_PART_LEN: usize = 8;
 
 #[derive(Serialize, Deserialize, Debug)]
 
@@ -34,7 +40,7 @@ enum WsMessage {
 
 #[derive(Serialize, Deserialize, Debug)]
 struct JoinReq {
-    room_id: String,
+    room_name: String,
     peer_info: PeerInfo,
 }
 
@@ -68,40 +74,45 @@ async fn main() -> ExitCode {
     };
 
     println!(
-        "Public key: {}\nPrivate key: {}",
+        "Public key: {}\nPrivate key: {}\n",
         &public_key.to_base64(),
         &private_key.to_base64()
     );
 
-    let room_id: String = read_str_from_cli(String::from("Input room id"));
-    let username = read_str_from_cli(String::from("Input your username"));
+    let room_name: String = read_str_from_cli(String::from("Input room id: "));
+    let username = read_str_from_cli(String::from("\nInput your username: "));
 
-    println!("Joining room... GLHF");
+    println!("\nJoining room... GLHF");
 
     match join_room(
-        &room_id,
+        &room_name,
         username,
         public_key.to_base64(),
         port,
         key_name,
-        &(INTERFACE_PREFIX.to_owned() + &room_id[..8])
+        &(INTERFACE_PREFIX.to_owned() + {
+            if room_name.len() <= MAX_INTERFACE_ROOM_PART_LEN {
+                &room_name
+            } else {
+                &room_name[..MAX_INTERFACE_ROOM_PART_LEN]
+            }
+        }),
     )
     .await
     {
-        Ok(_) => println!("Cool"),
+        Ok(_) => println!("Joined room: {}", room_name),
         Err(err) => eprintln!("Joining room failed: {}", err),
     };
     loop {}
 }
 
-
 async fn join_room(
-    room_id: &String,
+    room_name: &String,
     username: String,
     pub_key: String,
     port: u16,
     key_name: String,
-    interface_name: &String
+    interface_name: &String,
 ) -> Result<String, anyhow::Error> {
     let mapped_addr = loop {
         println!("Geting mapped address");
@@ -112,7 +123,6 @@ async fn join_room(
     };
     println!("Mapped address: {}\n", mapped_addr);
     let ws = websockets::WebSocket::connect(WS_ADDR).await?;
-    println!("{:?}", &ws);
     let data = PeerInfo {
         wg_ip: "".to_string(),
         pub_key,
@@ -120,37 +130,35 @@ async fn join_room(
         username,
     };
     let data = JoinReq {
-        room_id: room_id.clone(),
+        room_name: room_name.clone(),
         peer_info: data,
     };
-    println!("{:?}", &data);
     let data = serde_json::to_string(&data).unwrap();
     let (mut ws_read, mut ws_write) = ws.split();
 
     ws_write.send_text(data).await.unwrap();
-    println!("sent");
+    println!("Connect info sent");
 
     let (sender, receiver) = oneshot::channel();
     let interface_name = interface_name.clone();
-    let room_id = room_id.clone();
+    let room_name = room_name.clone();
     tokio::spawn(async move {
         let mut sender = Some(sender);
         let mut wg_ip = None;
         while let Ok(msg) = ws_read.receive().await {
-            println!("{:?}", &msg);
             match msg {
                 Frame::Text { payload, .. } => {
-                    println!("whahht {:?}", &payload);
                     let data: WsMessage = serde_json::from_str(payload.as_str()).unwrap();
                     if let WsMessage::WgIpMsg(ip) = data {
                         if sender.is_some() {
                             if let Err(_) = sender.unwrap().send(ip.clone()) {
                                 println!("the receiver dropped");
                             } else {
+                                println!("Got socket msg with wg ip");
                                 wg_ip = Some(ip);
                                 match wg_connect_to_each(
                                     &wg_ip.clone().unwrap(),
-                                    &room_id,
+                                    &room_name,
                                     port,
                                     &key_name,
                                     &interface_name,
@@ -160,7 +168,7 @@ async fn join_room(
                                     Ok(_) => {
                                         sub_to_room(
                                             wg_ip.clone().unwrap(),
-                                            room_id.clone(),
+                                            room_name.clone(),
                                             port,
                                             key_name.clone(),
                                             &interface_name,
@@ -179,7 +187,6 @@ async fn join_room(
                 _ => {}
             }
         }
-        println!("Error:");
     });
     if let Ok(wg_ip) = receiver.await {
         return Ok(wg_ip);
@@ -189,24 +196,24 @@ async fn join_room(
 
 async fn sub_to_room(
     wg_ip: String,
-    room_id: String,
+    room_name: String,
     port: u16,
     key_name: String,
     interface_name: &String,
 ) {
     {
-        let room_id = room_id.clone();
+        let room_name = room_name.clone();
         let interface_name = interface_name.clone();
         tokio::spawn(async move {
             let client = redis::Client::open(REDIS_URL).unwrap();
             let mut con = client.get_connection().unwrap();
             let mut pubsub = con.as_pubsub();
-            pubsub.subscribe(room_id.as_str()).unwrap();
+            pubsub.subscribe(room_name.as_str()).unwrap();
 
             loop {
                 let msg = pubsub.get_message().unwrap();
                 let payload: String = msg.get_payload().unwrap();
-                if msg.get_channel_name() == room_id {
+                if msg.get_channel_name() == room_name {
                     let data: WsMessage = serde_json::from_str(payload.as_str()).unwrap();
                     if let WsMessage::JoinReqMsg(join_req) = data {
                         println!("{} is trying to join", &join_req.peer_info.username);
@@ -233,7 +240,6 @@ async fn sub_to_room(
                         }
                     }
                 }
-                println!("channel '{}': {}", msg.get_channel_name(), payload);
             }
         });
     }
@@ -241,16 +247,16 @@ async fn sub_to_room(
 
 async fn wg_connect_to_each(
     wg_ip: &String,
-    room_id: &String,
+    room_name: &String,
     port: u16,
     key_name: &String,
     interface_name: &String,
 ) -> Result<(), anyhow::Error> {
     let client = redis::Client::open(REDIS_URL).unwrap();
     let mut con = client.get_connection().unwrap();
-    let peers_n: u16 = con.llen(&room_id)?;
+    let peers_n: u16 = con.llen(&room_name)?;
     for i in 0..peers_n {
-        let data: String = con.lindex(&room_id, i as isize)?;
+        let data: String = con.lindex(&room_name, i as isize)?;
         let peer_info: PeerInfo = serde_json::from_str(&data[..]).unwrap();
         if peer_info.wg_ip != *wg_ip {
             init_wg(
@@ -279,40 +285,72 @@ async fn init_wg(
     key_name: &str,
     interface_name: &String,
 ) -> Result<(), anyhow::Error> {
-    let res = run_terminal_command(format!("ip link show {} >/dev/null", &interface_name), true).await?;
+    let res =
+        run_terminal_command(format!("ip link show {} >/dev/null", &interface_name), true).await?;
     if res.len() != 0 {
-        run_terminal_command(format!("ip link add dev {} type wireguard", &interface_name), false).await?;
-        run_terminal_command(format!("ip link set mtu 1420 up dev {}", &interface_name), false).await?;
-        run_terminal_command(format!("ip link set up {}", &remote_username), false).await?;
+        run_terminal_command(
+            format!("ip link add dev {} type wireguard", &interface_name),
+            false,
+        )
+        .await?;
+        run_terminal_command(
+            format!("ip addr add {}/24 dev {}", &my_wg_ip, &interface_name),
+            false,
+        )
+        .await?;
+        run_terminal_command(
+            format!("ip link set mtu 1420 up dev {}", &interface_name),
+            false,
+        )
+        .await?;
+
+        run_terminal_command(
+            format!(
+                "wg set {} listen-port {} private-key {}",
+                &interface_name, port, key_name
+            ),
+            false,
+        )
+        .await?;
+
+        run_terminal_command(
+            format!(
+                "wg set {} peer {} persistent-keepalive 1 endpoint {} allowed-ips {}",
+                &interface_name, &GHOST_WG_PUB_KEY, &GHOST_WG_ADDRESS, &GHOST_WG_IP
+            ),
+            false,
+        )
+        .await?;
     }
-    run_terminal_command(format!(
-        "ip addr add {}/24 dev {}",
-        &my_wg_ip, &interface_name
-    ), false)
+
+    run_terminal_command(
+        format!(
+            "wg set {} peer {} persistent-keepalive 5 endpoint {} allowed-ips {}",
+            &interface_name, &remote_pub_key, &peer_address, &remote_wg_ip
+        ),
+        false,
+    )
     .await?;
 
-    run_terminal_command(format!(
-        "wg set {} listen-port {} private-key {}",
-        &remote_username, port, key_name
-    ), false)
-    .await?;
-
-    run_terminal_command(format!(
-        "wg set {} peer {} persistent-keepalive 1 endpoint {} allowed-ips {}",
-        &remote_username, &remote_pub_key, &peer_address, &remote_wg_ip
-    ), false)
-    .await?;
+    run_terminal_command(format!("ip link set up {}", &interface_name), false).await?;
 
     Ok(())
 }
 
-async fn run_terminal_command(command: String, allow_error: bool) -> Result<Vec<u8>, anyhow::Error> {
+async fn run_terminal_command(
+    command: String,
+    allow_error: bool,
+) -> Result<Vec<u8>, anyhow::Error> {
     let output = Command::new("bash").arg("-c").arg(&command).output()?;
     if !output.status.success() {
         if allow_error {
-            return Ok(output.stderr)
+            return Ok(output.stderr);
         }
-        anyhow::bail!("Error during command execution: \n{}\n{:?}", command, output)
+        anyhow::bail!(
+            "Error during command execution: \n{}\n{:?}",
+            command,
+            output
+        )
     }
     Ok(output.stdout)
 }
@@ -321,7 +359,7 @@ fn get_unused_port() -> u16 {
     let port = rand::thread_rng().gen_range(5000..20000);
     if let Ok(_) = TcpListener::bind(("localhost", port)) {
         return port;
-    } 
+    }
     return get_unused_port();
 }
 
