@@ -16,6 +16,7 @@ use tokio::sync::oneshot;
 use tokio::time::{sleep, Duration};
 use websockets::{self, Frame};
 use wireguard_keys::{self, Privkey};
+use rand::Rng;
 
 extern crate redis;
 use std::process::ExitCode;
@@ -53,20 +54,8 @@ async fn main() -> ExitCode {
         return ExitCode::from(1);
     }
 
-    let port = match get_unused_port().await {
-        Some(port) => port,
-        None => panic!("No free ports available"),
-    };
+    let port = get_unused_port();
     println!("Working with port {}\n", port);
-
-    let mapped_address = loop {
-        println!("Geting mapped address");
-        match get_mapped_addr(LOCAL_ADDR, port).await {
-            Ok(addr) => break addr,
-            Err(e) => eprintln!("{}", e),
-        }
-    };
-    println!("Mapped address: {}\n", mapped_address);
 
     let private_key = Privkey::generate();
     let key_hash_uid = get_hash(&private_key);
@@ -94,7 +83,6 @@ async fn main() -> ExitCode {
     match join_room(
         room_id,
         username,
-        mapped_address,
         public_key.to_base64(),
         port,
         key_name,
@@ -120,12 +108,19 @@ where
 async fn join_room(
     room_id: String,
     username: String,
-    mapped_addr: String,
     pub_key: String,
     port: u16,
     key_name: String,
     key_hash_uid: u64,
 ) -> Result<String, anyhow::Error> {
+    let mapped_addr = loop {
+        println!("Geting mapped address");
+        match get_mapped_addr(LOCAL_ADDR, port).await {
+            Ok(addr) => break addr,
+            Err(e) => eprintln!("{}", e),
+        }
+    };
+    println!("Mapped address: {}\n", mapped_addr);
     let ws = websockets::WebSocket::connect(WS_ADDR).await?;
     println!("{:?}", &ws);
     let data = PeerInfo {
@@ -291,48 +286,50 @@ async fn init_wg(
     key_name: &str,
     key_hash_uid: u64,
 ) -> Result<(), anyhow::Error> {
-    let res = run_terminal_command(format!("ip link show {} >/dev/null", &key_hash_uid)).await?;
+    let res = run_terminal_command(format!("ip link show {} >/dev/null", &key_hash_uid), true).await?;
     if res.len() != 0 {
-        run_terminal_command(format!("ip link add dev {} type wireguard", &key_hash_uid)).await?;
-        run_terminal_command(format!("ip link set mtu 1420 up dev {}", &key_hash_uid)).await?;
-        run_terminal_command(format!("ip link set up {}", &remote_username)).await?;
+        run_terminal_command(format!("ip link add dev {} type wireguard", &key_hash_uid), false).await?;
+        run_terminal_command(format!("ip link set mtu 1420 up dev {}", &key_hash_uid), false).await?;
+        run_terminal_command(format!("ip link set up {}", &remote_username), false).await?;
     }
     run_terminal_command(format!(
         "ip addr add {}/24 dev {}",
         &my_wg_ip, &key_hash_uid
-    ))
+    ), false)
     .await?;
 
     run_terminal_command(format!(
         "wg set {} listen-port {} private-key {}",
         &remote_username, port, key_name
-    ))
+    ), false)
     .await?;
 
     run_terminal_command(format!(
         "wg set {} peer {} persistent-keepalive 1 endpoint {} allowed-ips {}",
         &remote_username, &remote_pub_key, &peer_address, &remote_wg_ip
-    ))
+    ), false)
     .await?;
 
     Ok(())
 }
 
-async fn run_terminal_command(command: String) -> Result<Vec<u8>, anyhow::Error> {
+async fn run_terminal_command(command: String, allow_error: bool) -> Result<Vec<u8>, anyhow::Error> {
     let output = Command::new("bash").arg("-c").arg(&command).output()?;
     if !output.status.success() {
-        anyhow::bail!("Error during commnd execution: \n{}\n{:?}", command, output)
+        if allow_error {
+            return Ok(output.stderr)
+        }
+        anyhow::bail!("Error during command execution: \n{}\n{:?}", command, output)
     }
     Ok(output.stdout)
 }
 
-async fn get_unused_port() -> Option<u16> {
-    for port in 20000..27000 {
-        if let Ok(_) = TcpListener::bind(("localhost", port)) {
-            return Some(port);
-        }
-    }
-    None
+fn get_unused_port() -> u16 {
+    let port = rand::thread_rng().gen_range(5000..20000);
+    if let Ok(_) = TcpListener::bind(("localhost", port)) {
+        return port;
+    } 
+    return get_unused_port();
 }
 
 fn read_str_from_cli(msg: String) -> String {
