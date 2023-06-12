@@ -4,8 +4,6 @@ use nix::unistd::Uid;
 use redis::Commands;
 use serde::{Deserialize, Serialize};
 use serde_json;
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 use std::net::TcpListener;
 use std::process::Command;
 use std::sync::Arc;
@@ -25,6 +23,7 @@ const LOCAL_ADDR: &str = "0.0.0.0";
 const STUN_ADDR: &str = "stun.1und1.de:3478";
 const WS_ADDR: &str = "wss://server.mishakulik2.workers.dev/";
 const REDIS_URL: &str = "rediss://client:08794a557c35bd6449abc35ed8d3128930daa4600a87a768ca79848ee31760c3@balanced-mastiff-35201.upstash.io:35201";
+const INTERFACE_PREFIX: &str = "cnrs-";
 
 #[derive(Serialize, Deserialize, Debug)]
 
@@ -58,7 +57,6 @@ async fn main() -> ExitCode {
     println!("Working with port {}\n", port);
 
     let private_key = Privkey::generate();
-    let key_hash_uid = get_hash(&private_key);
     let public_key = private_key.pubkey();
     let key_name = Local::now()
         .format("/tmp/connect-wg-%Y_%m_%d_%H_%M_%S.key")
@@ -81,12 +79,12 @@ async fn main() -> ExitCode {
     println!("Joining room... GLHF");
 
     match join_room(
-        room_id,
+        &room_id,
         username,
         public_key.to_base64(),
         port,
         key_name,
-        key_hash_uid,
+        &(INTERFACE_PREFIX.to_owned() + &room_id[..8])
     )
     .await
     {
@@ -96,22 +94,14 @@ async fn main() -> ExitCode {
     loop {}
 }
 
-fn get_hash<T>(obj: T) -> u64
-where
-    T: Hash,
-{
-    let mut hasher = DefaultHasher::new();
-    obj.hash(&mut hasher);
-    hasher.finish()
-}
 
 async fn join_room(
-    room_id: String,
+    room_id: &String,
     username: String,
     pub_key: String,
     port: u16,
     key_name: String,
-    key_hash_uid: u64,
+    interface_name: &String
 ) -> Result<String, anyhow::Error> {
     let mapped_addr = loop {
         println!("Geting mapped address");
@@ -141,6 +131,8 @@ async fn join_room(
     println!("sent");
 
     let (sender, receiver) = oneshot::channel();
+    let interface_name = interface_name.clone();
+    let room_id = room_id.clone();
     tokio::spawn(async move {
         let mut sender = Some(sender);
         let mut wg_ip = None;
@@ -161,7 +153,7 @@ async fn join_room(
                                     &room_id,
                                     port,
                                     &key_name,
-                                    key_hash_uid,
+                                    &interface_name,
                                 )
                                 .await
                                 {
@@ -171,7 +163,7 @@ async fn join_room(
                                             room_id.clone(),
                                             port,
                                             key_name.clone(),
-                                            key_hash_uid,
+                                            &interface_name,
                                         )
                                         .await;
                                     }
@@ -200,10 +192,11 @@ async fn sub_to_room(
     room_id: String,
     port: u16,
     key_name: String,
-    key_hash_uid: u64,
+    interface_name: &String,
 ) {
     {
         let room_id = room_id.clone();
+        let interface_name = interface_name.clone();
         tokio::spawn(async move {
             let client = redis::Client::open(REDIS_URL).unwrap();
             let mut con = client.get_connection().unwrap();
@@ -226,7 +219,7 @@ async fn sub_to_room(
                                 &join_req.peer_info.mapped_addr,
                                 &join_req.peer_info.wg_ip,
                                 &key_name,
-                                key_hash_uid,
+                                &interface_name,
                             )
                             .await
                             {
@@ -251,7 +244,7 @@ async fn wg_connect_to_each(
     room_id: &String,
     port: u16,
     key_name: &String,
-    key_hash_uid: u64,
+    interface_name: &String,
 ) -> Result<(), anyhow::Error> {
     let client = redis::Client::open(REDIS_URL).unwrap();
     let mut con = client.get_connection().unwrap();
@@ -268,7 +261,7 @@ async fn wg_connect_to_each(
                 peer_info.mapped_addr.as_str(),
                 peer_info.wg_ip.as_str(),
                 &key_name.as_str(),
-                key_hash_uid,
+                interface_name,
             )
             .await?;
         }
@@ -284,17 +277,17 @@ async fn init_wg(
     peer_address: &str,
     remote_wg_ip: &str,
     key_name: &str,
-    key_hash_uid: u64,
+    interface_name: &String,
 ) -> Result<(), anyhow::Error> {
-    let res = run_terminal_command(format!("ip link show {} >/dev/null", &key_hash_uid), true).await?;
+    let res = run_terminal_command(format!("ip link show {} >/dev/null", &interface_name), true).await?;
     if res.len() != 0 {
-        run_terminal_command(format!("ip link add dev {} type wireguard", &key_hash_uid), false).await?;
-        run_terminal_command(format!("ip link set mtu 1420 up dev {}", &key_hash_uid), false).await?;
+        run_terminal_command(format!("ip link add dev {} type wireguard", &interface_name), false).await?;
+        run_terminal_command(format!("ip link set mtu 1420 up dev {}", &interface_name), false).await?;
         run_terminal_command(format!("ip link set up {}", &remote_username), false).await?;
     }
     run_terminal_command(format!(
         "ip addr add {}/24 dev {}",
-        &my_wg_ip, &key_hash_uid
+        &my_wg_ip, &interface_name
     ), false)
     .await?;
 
