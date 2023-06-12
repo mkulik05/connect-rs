@@ -257,6 +257,7 @@ dependencies = [
  "core_extensions",
  "ctrlc",
  "nix",
+ "rand 0.8.5",
  "redis",
  "rustls",
  "serde",
