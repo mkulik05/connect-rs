@@ -7,9 +7,11 @@ edition = "2021"
 
 [dependencies]
 anyhow = "1.0.71"
+async-trait = "0.1.68"
 chrono = "0.4.26"
 core_extensions = { version = "1.5.3", features = ["on_drop"]}
 ctrlc = "3.4.0"
+futures = "0.3.28"
 nix = "0.26.2"
 rand = "0.8.5"
 redis =  { version = "0.23.0", features = ["tls-native-tls"] }

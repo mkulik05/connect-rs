@@ -1,22 +1,21 @@
-use anyhow;
 use chrono::prelude::*;
 use nix::unistd::Uid;
 use rand::Rng;
 use redis::Commands;
 use serde::{Deserialize, Serialize};
-use serde_json;
 use std::net::TcpListener;
 use std::process::Command;
-// use std::sync::Arc;
+use std::sync::Arc;
 use stun_client::*;
+use futures::lock::Mutex;
 // use surge_ping;
-use tokio::fs;
+use tokio::fs::write;
 use tokio::sync::oneshot;
-// use tokio::time::{sleep, Duration};
+use tokio::time::{sleep, Duration};
 use websockets::{self, Frame};
 use wireguard_keys::{self, Privkey};
-
 extern crate redis;
+use async_trait::async_trait;
 use std::process::ExitCode;
 
 const LOCAL_ADDR: &str = "0.0.0.0";
@@ -31,8 +30,101 @@ const GHOST_WG_ADDRESS: &str = "1.1.1.1:32322";
 const INTERFACE_PREFIX: &str = "cnrs-";
 const MAX_INTERFACE_ROOM_PART_LEN: usize = 8;
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Clone)]
+struct KernelWg {}
 
+impl KernelWg {
+    async fn interface_exists(interface_name: &str) -> Result<bool, anyhow::Error> {
+        let res =
+            run_terminal_command(format!("ip link show {} >/dev/null", &interface_name), true)
+                .await?;
+        Ok(res.len() == 0)
+    }
+    async fn create_wg_interface(interface_name: &str) -> Result<(), anyhow::Error> {
+        run_terminal_command(
+            format!("ip link add dev {} type wireguard", &interface_name),
+            false,
+        )
+        .await?;
+        Ok(())
+    }
+
+    async fn add_interface_ip(
+        interface_name: &str,
+        my_wg_ip: &str,
+    ) -> Result<(), anyhow::Error> {
+        run_terminal_command(
+            format!("ip addr add {}/24 dev {}", &my_wg_ip, &interface_name),
+            false,
+        )
+        .await?;
+        Ok(())
+    }
+}
+
+#[async_trait]
+trait Wg: Send + Sync {
+    async fn init_wg(
+        &self,
+        interface_name: &str,
+        port: u16,
+        key_path: &str,
+        my_wg_ip: &str,
+    ) -> Result<(), anyhow::Error>;
+    async fn add_wg_peer(
+        &self,
+        interface_name: &str,
+        remote_pub_key: &str,
+        peer_address: &str,
+        remote_wg_ip: &str,
+    ) -> Result<(), anyhow::Error>;
+    async fn clean_wg_up(
+        &self,
+        interface_name: &str,
+    ) -> Result<(), anyhow::Error>;
+}
+
+#[async_trait]
+impl Wg for KernelWg {
+    async fn init_wg(
+        &self,
+        interface_name: &str,
+        port: u16,
+        key_path: &str,
+        my_wg_ip: &str,
+    ) -> Result<(), anyhow::Error> {
+        if !KernelWg::interface_exists(&interface_name).await? {
+            KernelWg::create_wg_interface(&interface_name).await?;
+        }
+        KernelWg::add_interface_ip(&interface_name, &my_wg_ip).await?;
+        Ok(())
+    }
+    async fn add_wg_peer(
+        &self,
+        interface_name: &str,
+        remote_pub_key: &str,
+        peer_address: &str,
+        remote_wg_ip: &str,
+    ) -> Result<(), anyhow::Error> {
+        run_terminal_command(
+            format!(
+                "wg set {} peer {} persistent-keepalive 1 endpoint {} allowed-ips {}",
+                &interface_name, &remote_pub_key, &peer_address, &remote_wg_ip
+            ),
+            false,
+        )
+        .await?;
+        Ok(())
+    }
+    async fn clean_wg_up(
+        &self,
+        interface_name: &str,
+    ) -> Result<(), anyhow::Error> {
+        Ok(())
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug)]
 enum WsMessage {
     WgIpMsg(String),
     JoinReqMsg(JoinReq),
@@ -68,7 +160,7 @@ async fn main() -> ExitCode {
         .format("/tmp/connect-wg-%Y_%m_%d_%H_%M_%S.key")
         .to_string();
 
-    match fs::write(&key_name, private_key.to_base64().as_bytes()).await {
+    match write(&key_name, private_key.to_base64().as_bytes()).await {
         Ok(_) => {}
         Err(e) => eprintln!("Error saving key: {}", e),
     };
@@ -103,7 +195,8 @@ async fn main() -> ExitCode {
         Ok(_) => println!("Joined room: {}", room_name),
         Err(err) => eprintln!("Joining room failed: {}", err),
     };
-    loop {}
+    sleep(Duration::from_secs(3600 * 24 * 365)).await;
+    ExitCode::from(0)
 }
 
 async fn join_room(
@@ -143,6 +236,7 @@ async fn join_room(
     let (sender, receiver) = oneshot::channel();
     let interface_name = interface_name.clone();
     let room_name = room_name.clone();
+    let wg: Arc<dyn Wg> = Arc::new(KernelWg {});
     tokio::spawn(async move {
         let mut sender = Some(sender);
         let mut wg_ip = None;
@@ -157,23 +251,28 @@ async fn join_room(
                             } else {
                                 println!("Got socket msg with wg ip");
                                 wg_ip = Some(ip.clone());
-                                match init_wg(&ip, port, key_name.as_str(), &interface_name).await {
+                                match wg.init_wg(  
+                                    key_name.as_str(),
+                                    port,
+                                    &interface_name,
+                                    ip.as_str(),
+                                )
+                                .await
+                                {
                                     Ok(_) => {
                                         match wg_connect_to_each(
+                                            wg.clone(),
                                             &ip,
                                             &room_name,
-                                            port,
-                                            &key_name,
                                             &interface_name,
                                         )
                                         .await
                                         {
                                             Ok(_) => {
                                                 sub_to_room(
+                                                    wg.clone(),
                                                     wg_ip.clone().unwrap(),
                                                     room_name.clone(),
-                                                    port,
-                                                    key_name.clone(),
                                                     &interface_name,
                                                 )
                                                 .await;
@@ -205,13 +304,7 @@ async fn join_room(
     anyhow::bail!("Didn't receive message with wg ip")
 }
 
-async fn sub_to_room(
-    wg_ip: String,
-    room_name: String,
-    port: u16,
-    key_name: String,
-    interface_name: &String,
-) {
+async fn sub_to_room(wg: Arc<dyn Wg>, wg_ip: String, room_name: String, interface_name: &String) {
     {
         let room_name = room_name.clone();
         let interface_name = interface_name.clone();
@@ -229,13 +322,10 @@ async fn sub_to_room(
                     if let WsMessage::JoinReqMsg(join_req) = data {
                         println!("{} is trying to join", &join_req.peer_info.username);
                         if wg_ip != join_req.peer_info.wg_ip {
-                            match add_wg_peer(
-                                &wg_ip,
-                                port,
+                            match wg.add_wg_peer(
                                 &join_req.peer_info.pub_key,
                                 &join_req.peer_info.mapped_addr,
                                 &join_req.peer_info.wg_ip,
-                                &key_name,
                                 &interface_name,
                             )
                             .await
@@ -256,10 +346,9 @@ async fn sub_to_room(
 }
 
 async fn wg_connect_to_each(
+    wg: Arc<dyn Wg>,
     wg_ip: &String,
     room_name: &String,
-    port: u16,
-    key_name: &String,
     interface_name: &String,
 ) -> Result<(), anyhow::Error> {
     let client = redis::Client::open(REDIS_URL).unwrap();
@@ -269,14 +358,12 @@ async fn wg_connect_to_each(
         let data: String = con.lindex(&room_name, i as isize)?;
         let peer_info: PeerInfo = serde_json::from_str(&data[..]).unwrap();
         if peer_info.wg_ip != *wg_ip {
-            add_wg_peer(
-                &wg_ip,
-                port,
+            wg.add_wg_peer(
+                interface_name,
                 peer_info.pub_key.as_str(),
                 peer_info.mapped_addr.as_str(),
                 peer_info.wg_ip.as_str(),
-                &key_name.as_str(),
-                interface_name,
+                
             )
             .await?;
         }
@@ -284,75 +371,61 @@ async fn wg_connect_to_each(
     Ok(())
 }
 
-async fn init_wg(
-    my_wg_ip: &str,
-    port: u16,
-    key_name: &str,
-    interface_name: &String,
-) -> Result<(), anyhow::Error> {
-    let res =
-        run_terminal_command(format!("ip link show {} >/dev/null", &interface_name), true).await?;
-    if res.len() != 0 {
-        run_terminal_command(
-            format!("ip link add dev {} type wireguard", &interface_name),
-            false,
-        )
-        .await?;
-    }
-    run_terminal_command(
-        format!("ip addr add {}/24 dev {}", &my_wg_ip, &interface_name),
-        false,
-    )
-    .await?;
-    run_terminal_command(
-        format!("ip link set mtu 1420 up dev {}", &interface_name),
-        false,
-    )
-    .await?;
+// async fn init_wg(
+//     mut wg: Arc<dyn Wg>,
+//     my_wg_ip: &str,
+//     port: u16,
+//     key_name: &str,
+//     interface_name: &String,
+// ) -> Result<(), anyhow::Error> {
+//     let mut wg = wg.lock().await;
+//     if !wg.interface_exists(&interface_name).await? {
+//         wg.create_wg_interface(&interface_name).await?;
+//     }
+//     wg.add_interface_ip(&interface_name, &my_wg_ip).await?;
+//     // run_terminal_command(
+//     //     format!("ip link set mtu 1420 up dev {}", &interface_name),
+//     //     false,
+//     // )
+//     // .await?;
 
-    run_terminal_command(
-        format!(
-            "wg set {} listen-port {} private-key {}",
-            &interface_name, port, key_name
-        ),
-        false,
-    )
-    .await?;
+    
+//     run_terminal_command(
+//         format!(
+//             "wg set {} listen-port {} private-key {}",
+//             &interface_name, port, key_name
+//         ),
+//         false,
+//     )
+//     .await?;
 
-    run_terminal_command(
-        format!(
-            "wg set {} peer {} persistent-keepalive 1 endpoint {} allowed-ips {}",
-            &interface_name, &GHOST_WG_PUB_KEY, &GHOST_WG_ADDRESS, &GHOST_WG_IP
-        ),
-        false,
-    )
-    .await?;
-    run_terminal_command(format!("ip link set up {}", &interface_name), false).await?;
-    Ok(())
-}
+//     run_terminal_command(
+//         format!(
+//             "wg set {} peer {} persistent-keepalive 1 endpoint {} allowed-ips {}",
+//             &interface_name, &GHOST_WG_PUB_KEY, &GHOST_WG_ADDRESS, &GHOST_WG_IP
+//         ),
+//         false,
+//     )
+//     .await?;
+//     run_terminal_command(format!("ip link set up {}", &interface_name), false).await?;
+//     Ok(())
+// }
 
-async fn add_wg_peer(
-    my_wg_ip: &str,
-    port: u16,
-    remote_pub_key: &str,
-    peer_address: &str,
-    remote_wg_ip: &str,
-    key_name: &str,
-    interface_name: &String,
-) -> Result<(), anyhow::Error> {
-    run_terminal_command(
-        format!(
-            "wg set {} peer {} persistent-keepalive 1 endpoint {} allowed-ips {}",
-            &interface_name, &remote_pub_key, &peer_address, &remote_wg_ip
-        ),
-        false,
-    )
-    .await?;
+// async fn add_wg_peer(
+//     wg: Arc<dyn Wg>,
+//     remote_pub_key: &str,
+//     peer_address: &str,
+//     remote_wg_ip: &str,
+//     interface_name: &String,
+// ) -> Result<(), anyhow::Error> {
+//     let mut wg = wg.lock().await;
+//     wg.add_wg_peer(interface_name, remote_pub_key, peer_address, remote_wg_ip).await
+    
 
-    run_terminal_command(format!("ip link set up {}", &interface_name), false).await?;
+//     // run_terminal_command(format!("ip link set up {}", &interface_name), false).await?;
 
-    Ok(())
-}
+//     // Ok(())
+// }
 
 async fn run_terminal_command(
     command: String,
