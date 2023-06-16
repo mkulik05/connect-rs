@@ -49,6 +49,18 @@ impl KernelWg {
         Ok(())
     }
 
+    async fn configure_wg(interface_name: &str, port: u16, key_name: &str) -> Result<(), anyhow::Error> {
+        run_terminal_command(
+            format!(
+                "wg set {} listen-port {} private-key {}",
+                &interface_name, port, key_name
+            ),
+            false,
+        )
+        .await?;
+        Ok(())
+    }
+
     async fn add_interface_ip(
         interface_name: &str,
         my_wg_ip: &str,
@@ -58,6 +70,12 @@ impl KernelWg {
             false,
         )
         .await?;
+        Ok(())
+    }
+    async fn start_interface(
+        interface_name: &str,
+    ) -> Result<(), anyhow::Error> {
+        run_terminal_command(format!("ip link set up {}", &interface_name), false).await?;
         Ok(())
     }
 }
@@ -96,7 +114,10 @@ impl Wg for KernelWg {
         if !KernelWg::interface_exists(&interface_name).await? {
             KernelWg::create_wg_interface(&interface_name).await?;
         }
+        KernelWg::configure_wg(interface_name, port, key_path).await?;
         KernelWg::add_interface_ip(&interface_name, &my_wg_ip).await?;
+        self.add_wg_peer(&interface_name, GHOST_WG_PUB_KEY, GHOST_WG_ADDRESS, GHOST_WG_IP).await?;
+        KernelWg::start_interface(&interface_name).await?;
         Ok(())
     }
     async fn add_wg_peer(
@@ -252,9 +273,9 @@ async fn join_room(
                                 println!("Got socket msg with wg ip");
                                 wg_ip = Some(ip.clone());
                                 match wg.init_wg(  
-                                    key_name.as_str(),
-                                    port,
                                     &interface_name,
+                                    port,
+                                    key_name.as_str(),
                                     ip.as_str(),
                                 )
                                 .await
@@ -323,10 +344,11 @@ async fn sub_to_room(wg: Arc<dyn Wg>, wg_ip: String, room_name: String, interfac
                         println!("{} is trying to join", &join_req.peer_info.username);
                         if wg_ip != join_req.peer_info.wg_ip {
                             match wg.add_wg_peer(
+                                &interface_name,
                                 &join_req.peer_info.pub_key,
                                 &join_req.peer_info.mapped_addr,
                                 &join_req.peer_info.wg_ip,
-                                &interface_name,
+                                
                             )
                             .await
                             {
