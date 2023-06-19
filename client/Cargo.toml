@@ -11,6 +11,7 @@ async-trait = "0.1.68"
 chrono = "0.4.26"
 core_extensions = { version = "1.5.3", features = ["on_drop"]}
 ctrlc = "3.4.0"
+ctrlc-async = "3.2.2"
 futures = "0.3.28"
 nix = "0.26.2"
 rand = "0.8.5"
