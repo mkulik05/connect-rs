@@ -2,7 +2,6 @@ use anyhow::Context;
 use chrono::prelude::*;
 use nix::unistd::Uid;
 use rand::Rng;
-use redis::Commands;
 use serde::{Deserialize, Serialize};
 use std::net::TcpListener;
 use std::sync::Arc;
@@ -177,15 +176,6 @@ async fn join_room(
         .await
         .with_context(|| "failed to init wg")?;
 
-    server
-        .connect_to_each(sender.clone(), room_name, &wg_ip)
-        .await
-        .with_context(|| "Error during connection to other peers")?;
-
-    server
-        .sub_to_changes(sender.clone(), &wg_ip, &room_name)
-        .await?;
-
     let mut rx2 = sender.subscribe();
     let wg = wg.clone();
     let interface_name = interface_name.clone();
@@ -205,12 +195,21 @@ async fn join_room(
                         println!("{} joined", &join_req.peer_info.username);
                     }
                     Err(err) => {
-                        eprintln!("Error during initialising new connection: {}", err)
+                        eprintln!("Error during initialising new connection: {:?}", err)
                     }
                 };
             }
         }
     });
+
+    server
+        .connect_to_each(sender.clone(), room_name, &wg_ip)
+        .await
+        .with_context(|| "Error during connection to other peers")?;
+
+    server
+        .sub_to_changes(sender.clone(), &wg_ip, &room_name)
+        .await?;
 
     Ok(())
 }

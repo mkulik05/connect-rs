@@ -132,7 +132,9 @@ impl ServerTrait for Server {
         let client = redis::Client::open(REDIS_URL)?;
         let mut con = client.get_tokio_connection().await?;
         let len: isize = con.llen(room_name).await?;
+        println!("{:?}", len);
         let peers: Vec<String> = con.lrange(room_name, 0, len).await?;
+        println!("{:?}", peers);
         for peer in peers {
             let peer_info: PeerInfo = serde_json::from_str(peer.as_str())?;
             if peer_info.wg_ip != *wg_ip {
