@@ -118,7 +118,6 @@ async fn main() -> ExitCode {
 
             ctrlc::set_handler(move || {
                 r.store(false, Ordering::SeqCst);
-                println!("it worked");
             })
             .expect("Error setting Ctrl-C handler");
 
