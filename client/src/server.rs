@@ -86,7 +86,7 @@ impl ServerTrait for Server {
             }
             let mut pubsub = pubsub.into_on_message();
             loop {
-                if let Ok(CnrsMessage::Shutdown) = rx.recv().await {
+                if let Ok(CnrsMessage::Shutdown) = rx.try_recv() {
                     return;
                 }
                 let msg = match pubsub.next().await {
