@@ -5,10 +5,10 @@ use crate::REDIS_URL;
 use crate::WS_ADDR;
 use anyhow::Context;
 use async_trait::async_trait;
+use futures::prelude::*;
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast::Sender;
 use tokio::sync::oneshot;
-use tokio::time::Duration;
 use websockets::{self, Frame};
 #[derive(Serialize, Deserialize, Debug)]
 enum WsMessage {
@@ -72,29 +72,26 @@ impl ServerTrait for Server {
         room_name: &String,
     ) -> Result<(), anyhow::Error> {
         let client = redis::Client::open(REDIS_URL)?;
-        let mut con = client.get_connection()?;
+        let mut con = client.get_tokio_connection().await?;
 
         let room_name = room_name.to_string();
         let wg_ip = wg_ip.to_string();
         let mut rx = sender.subscribe();
         tokio::spawn(async move {
-            let mut pubsub = con.as_pubsub();
-            if let Err(e) = pubsub.subscribe(room_name.as_str()) {
+            let mut pubsub = con.into_pubsub();
+            
+            if let Err(e) = pubsub.subscribe(room_name.as_str()).await {
                 eprintln!("Failed to subscribe to channel: {}", e);
                 return;
             }
-            pubsub
-                .set_read_timeout(Some(Duration::from_millis(100)))
-                .unwrap();
-
+            let mut pubsub = pubsub.into_on_message();
             loop {
                 if let Ok(CnrsMessage::Shutdown) = rx.recv().await {
                     return;
                 }
-                let msg = match pubsub.get_message() {
-                    Ok(msg) => msg,
-                    Err(err) => {
-                        eprintln!("Error while getting message from pub sub {}", err);
+                let msg = match pubsub.next().await {
+                    Some(msg) => msg,
+                    None => {
                         continue;
                     }
                 };
