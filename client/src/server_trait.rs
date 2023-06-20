@@ -10,4 +10,5 @@ pub trait ServerTrait: Send + Sync {
         wg_ip: &String,
         room_name: &String,
     ) -> Result<(), anyhow::Error>;
+    async fn connect_to_each(&self, sender: Sender<CnrsMessage>, room_name: &String, wg_ip: &String) -> Result<(), anyhow::Error>; 
 }
