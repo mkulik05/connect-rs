@@ -176,7 +176,9 @@ async fn join_room(
     wg.init_wg(&interface_name, port, key_name.as_str(), wg_ip.as_str())
         .await
         .with_context(|| "failed to init wg")?;
-    wg_connect_to_each(wg.clone(), &wg_ip, &room_name, &interface_name)
+
+    server
+        .connect_to_each(sender.clone(), room_name, &wg_ip)
         .await
         .with_context(|| "Error during connection to other peers")?;
 
@@ -210,31 +212,6 @@ async fn join_room(
         }
     });
 
-    Ok(())
-}
-
-async fn wg_connect_to_each(
-    wg: Arc<dyn Wg>,
-    wg_ip: &String,
-    room_name: &String,
-    interface_name: &String,
-) -> Result<(), anyhow::Error> {
-    let client = redis::Client::open(REDIS_URL)?;
-    let mut con = client.get_connection()?;
-    let peers_n: u16 = con.llen(&room_name)?;
-    for i in 0..peers_n {
-        let data: String = con.lindex(&room_name, i as isize)?;
-        let peer_info: PeerInfo = serde_json::from_str(&data[..])?;
-        if peer_info.wg_ip != *wg_ip {
-            wg.add_wg_peer(
-                interface_name,
-                peer_info.pub_key.as_str(),
-                peer_info.mapped_addr.as_str(),
-                peer_info.wg_ip.as_str(),
-            )
-            .await?;
-        }
-    }
     Ok(())
 }
 

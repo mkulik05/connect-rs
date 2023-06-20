@@ -1,11 +1,12 @@
 use crate::server_trait::ServerTrait;
 use crate::CnrsMessage;
-use crate::JoinReq;
 use crate::REDIS_URL;
 use crate::WS_ADDR;
+use crate::{JoinReq, PeerInfo};
 use anyhow::Context;
 use async_trait::async_trait;
 use futures::prelude::*;
+use redis::AsyncCommands;
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast::Sender;
 use tokio::sync::oneshot;
@@ -72,14 +73,14 @@ impl ServerTrait for Server {
         room_name: &String,
     ) -> Result<(), anyhow::Error> {
         let client = redis::Client::open(REDIS_URL)?;
-        let mut con = client.get_tokio_connection().await?;
+        let con = client.get_tokio_connection().await?;
 
         let room_name = room_name.to_string();
         let wg_ip = wg_ip.to_string();
         let mut rx = sender.subscribe();
         tokio::spawn(async move {
             let mut pubsub = con.into_pubsub();
-            
+
             if let Err(e) = pubsub.subscribe(room_name.as_str()).await {
                 eprintln!("Failed to subscribe to channel: {}", e);
                 return;
@@ -120,6 +121,27 @@ impl ServerTrait for Server {
                 }
             }
         });
+        Ok(())
+    }
+    async fn connect_to_each(
+        &self,
+        sender: Sender<CnrsMessage>,
+        room_name: &String,
+        wg_ip: &String,
+    ) -> Result<(), anyhow::Error> {
+        let client = redis::Client::open(REDIS_URL)?;
+        let mut con = client.get_tokio_connection().await?;
+        let len: isize = con.llen(room_name).await?;
+        let peers: Vec<String> = con.lrange(room_name, 0, len).await?;
+        for peer in peers {
+            let peer_info: PeerInfo = serde_json::from_str(peer.as_str())?;
+            if peer_info.wg_ip != *wg_ip {
+                sender.send(CnrsMessage::PeerDiscovered(JoinReq {
+                    room_name: room_name.to_string(),
+                    peer_info,
+                }))?;
+            }
+        }
         Ok(())
     }
 }
