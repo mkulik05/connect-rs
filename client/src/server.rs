@@ -1,16 +1,15 @@
 use crate::server_trait::ServerTrait;
 use crate::CnrsMessage;
 use crate::REDIS_URL;
-use crate::WS_ADDR;
+use crate::SERVER_ADDR;
 use crate::{JoinReq, PeerInfo};
-use anyhow::Context;
 use async_trait::async_trait;
 use futures::prelude::*;
+use anyhow::Context;
 use redis::AsyncCommands;
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast::Sender;
-use tokio::sync::oneshot;
-use websockets::{self, Frame};
+
 #[derive(Serialize, Deserialize, Debug)]
 enum WsMessage {
     WgIpMsg(String),
@@ -19,51 +18,25 @@ enum WsMessage {
 
 pub struct Server {}
 
-impl Server {
-    async fn process_socket_msg(
-        payload: &String,
-        sender: &mut Option<oneshot::Sender<String>>,
-    ) -> Result<(), anyhow::Error> {
-        let data: WsMessage = serde_json::from_str(payload.as_str())
-            .with_context(|| format!("Error parsing socket message: '{}'", payload))?;
-
-        if let WsMessage::WgIpMsg(ip) = data {
-            if let Some(sender) = sender.take() {
-                if let Err(e) = sender.send(ip.clone()) {
-                    anyhow::bail!("Error on sending to channel {}", e);
-                }
-            }
-        }
-        Ok(())
-    }
-}
-
 #[async_trait]
 impl ServerTrait for Server {
-    async fn send_peer_info(&self, data: &String) -> Result<String, anyhow::Error> {
-        let ws = websockets::WebSocket::connect(WS_ADDR).await?;
-        let (mut ws_read, mut ws_write) = ws.split();
-        ws_write.send_text(data.to_owned()).await?;
-
-        let (sender, receiver) = oneshot::channel();
-        tokio::spawn(async move {
-            let mut sender = Some(sender);
-            while let Ok(msg) = ws_read.receive().await {
-                match msg {
-                    Frame::Text { payload, .. } => {
-                        match Server::process_socket_msg(&payload, &mut sender).await {
-                            Ok(_) => break,
-                            Err(e) => eprintln!("Error: {:?}", e),
-                        };
-                    }
-                    _ => {}
-                }
+    async fn send_peer_info(&self, data: String) -> Result<String, anyhow::Error> {
+        let client = reqwest::Client::new();
+        let res = client
+            .post(SERVER_ADDR)
+            .body(data)
+            .send()
+            .await?;
+        if res.status() == 200 {
+            let data = res.text().await?;
+            let data: WsMessage = serde_json::from_str(data.as_str())
+            .with_context(|| format!("Error parsing socket message: '{}'", data))?;
+            if let WsMessage::WgIpMsg(ip) = data {
+                return Ok(ip);
             }
-        });
-        if let Ok(wg_ip) = receiver.await {
-            return Ok(wg_ip);
-        }
-        anyhow::bail!("Didn't receive message with wg ip")
+            anyhow::bail!("Wrong response"); 
+        } 
+        anyhow::bail!("Status after post request code: {}", res.status());
     }
 
     async fn sub_to_changes(
@@ -132,9 +105,7 @@ impl ServerTrait for Server {
         let client = redis::Client::open(REDIS_URL)?;
         let mut con = client.get_tokio_connection().await?;
         let len: isize = con.llen(room_name).await?;
-        println!("{:?}", len);
         let peers: Vec<String> = con.lrange(room_name, 0, len).await?;
-        println!("{:?}", peers);
         for peer in peers {
             let peer_info: PeerInfo = serde_json::from_str(peer.as_str())?;
             if peer_info.wg_ip != *wg_ip {

@@ -25,7 +25,7 @@ use crate::wg_trait::Wg;
 
 const LOCAL_ADDR: &str = "0.0.0.0";
 const STUN_ADDR: &str = "stun.1und1.de:3478";
-const WS_ADDR: &str = "wss://server.mishakulik2.workers.dev/";
+const SERVER_ADDR: &str = "https://server.mishakulik2.workers.dev/";
 const REDIS_URL: &str = "rediss://client:08794a557c35bd6449abc35ed8d3128930daa4600a87a768ca79848ee31760c3@balanced-mastiff-35201.upstash.io:35201";
 
 const GHOST_WG_IP: &str = "10.9.0.0";
@@ -169,7 +169,7 @@ async fn join_room(
         peer_info: data,
     };
     let data = serde_json::to_string(&data)?;
-    let wg_ip = server.send_peer_info(&data).await?;
+    let wg_ip = server.send_peer_info(data).await?;
 
     println!("Connect info sent");
     wg.init_wg(&interface_name, port, key_name.as_str(), wg_ip.as_str())
