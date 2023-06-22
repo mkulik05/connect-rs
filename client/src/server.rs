@@ -3,9 +3,9 @@ use crate::CnrsMessage;
 use crate::REDIS_URL;
 use crate::SERVER_ADDR;
 use crate::{JoinReq, PeerInfo};
+use anyhow::Context;
 use async_trait::async_trait;
 use futures::prelude::*;
-use anyhow::Context;
 use redis::AsyncCommands;
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast::Sender;
@@ -22,20 +22,16 @@ pub struct Server {}
 impl ServerTrait for Server {
     async fn send_peer_info(&self, data: String) -> Result<String, anyhow::Error> {
         let client = reqwest::Client::new();
-        let res = client
-            .post(SERVER_ADDR)
-            .body(data)
-            .send()
-            .await?;
+        let res = client.post(SERVER_ADDR).body(data).send().await?;
         if res.status() == 200 {
             let data = res.text().await?;
             let data: WsMessage = serde_json::from_str(data.as_str())
-            .with_context(|| format!("Error parsing socket message: '{}'", data))?;
+                .with_context(|| format!("Error parsing socket message: '{}'", data))?;
             if let WsMessage::WgIpMsg(ip) = data {
                 return Ok(ip);
             }
-            anyhow::bail!("Wrong response"); 
-        } 
+            anyhow::bail!("Wrong response");
+        }
         anyhow::bail!("Status after post request code: {}", res.status());
     }
 
@@ -60,38 +56,44 @@ impl ServerTrait for Server {
             }
             let mut pubsub = pubsub.into_on_message();
             loop {
-                if let Ok(CnrsMessage::Shutdown) = rx.try_recv() {
-                    return;
-                }
-                let msg = match pubsub.next().await {
-                    Some(msg) => msg,
-                    None => {
-                        continue;
+                tokio::select! {
+                    broadcast_msg = rx.recv() => {
+                        if let Ok(CnrsMessage::Shutdown) = broadcast_msg {
+                            return;
+                        }
                     }
-                };
-                let payload: String = match msg.get_payload() {
-                    Ok(payload) => payload,
-                    Err(err) => {
-                        eprintln!("Error on getting msg payload {}", err);
-                        continue;
-                    }
-                };
-                if msg.get_channel_name() == room_name {
-                    let ws_msg: Result<WsMessage, _> = serde_json::from_str(payload.as_str());
-                    if let Ok(data) = ws_msg {
-                        if let WsMessage::JoinReqMsg(join_req) = data {
-                            println!("{} is trying to join", &join_req.peer_info.username);
-                            if *wg_ip != join_req.peer_info.wg_ip {
-                                match sender.send(CnrsMessage::PeerDiscovered(join_req)) {
-                                    Ok(_) => {}
-                                    Err(e) => {
-                                        eprintln!("Error is sending broadcast message: {}", e)
+                    msg = pubsub.next()  => {
+                        let msg = match msg {
+                            Some(msg) => msg,
+                            None => {
+                                continue;
+                            }
+                        };
+                        let payload: String = match msg.get_payload() {
+                            Ok(payload) => payload,
+                            Err(err) => {
+                                eprintln!("Error on getting msg payload {}", err);
+                                continue;
+                            }
+                        };
+                        if msg.get_channel_name() == room_name {
+                            let ws_msg: Result<WsMessage, _> = serde_json::from_str(payload.as_str());
+                            if let Ok(data) = ws_msg {
+                                if let WsMessage::JoinReqMsg(join_req) = data {
+                                    println!("{} is trying to join", &join_req.peer_info.username);
+                                    if *wg_ip != join_req.peer_info.wg_ip {
+                                        match sender.send(CnrsMessage::PeerDiscovered(join_req)) {
+                                            Ok(_) => {}
+                                            Err(e) => {
+                                                eprintln!("Error is sending broadcast message: {}", e)
+                                            }
+                                        };
                                     }
-                                };
+                                }
                             }
                         }
                     }
-                }
+                };
             }
         });
         Ok(())
