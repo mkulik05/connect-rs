@@ -6,7 +6,6 @@ use serde::{Deserialize, Serialize};
 use std::net::TcpListener;
 use std::sync::Arc;
 use stun_client::*;
-// use surge_ping;
 use tokio::fs::write;
 use tokio::sync::broadcast;
 use tokio::sync::broadcast::Sender;
