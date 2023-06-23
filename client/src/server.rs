@@ -2,37 +2,38 @@ use crate::server_trait::ServerTrait;
 use crate::CnrsMessage;
 use crate::REDIS_URL;
 use crate::SERVER_ADDR;
-use crate::{JoinReq, PeerInfo};
-use anyhow::Context;
+use crate::{DisconnectReq, JoinReq, PeerInfo, UpdateTimerReq};
 use async_trait::async_trait;
 use futures::prelude::*;
 use redis::AsyncCommands;
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast::Sender;
 
-#[derive(Serialize, Deserialize, Debug)]
-enum WsMessage {
-    WgIpMsg(String),
-    JoinReqMsg(JoinReq),
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(tag = "type")]
+enum InfoMsg {
+    JoinMsg(JoinReq),
+    DisconnectMsg(DisconnectReq),
+    UpdateLastConnected(UpdateTimerReq),
 }
 
 pub struct Server {}
 
 #[async_trait]
 impl ServerTrait for Server {
-    async fn send_peer_info(&self, data: String) -> Result<String, anyhow::Error> {
+    async fn send_peer_info(&self, data: JoinReq) -> Result<String, anyhow::Error> {
+        let data: String = serde_json::to_string(&InfoMsg::JoinMsg(data))?;
         let client = reqwest::Client::new();
         let res = client.post(SERVER_ADDR).body(data).send().await?;
         if res.status() == 200 {
             let data = res.text().await?;
-            let data: WsMessage = serde_json::from_str(data.as_str())
-                .with_context(|| format!("Error parsing socket message: '{}'", data))?;
-            if let WsMessage::WgIpMsg(ip) = data {
-                return Ok(ip);
-            }
-            anyhow::bail!("Wrong response");
+            return Ok(data);
         }
-        anyhow::bail!("Status after post request code: {}", res.status());
+        anyhow::bail!(
+            "Status after post request: {}, msg: {}",
+            res.status(),
+            res.text().await.unwrap_or("-".to_string())
+        );
     }
 
     async fn sub_to_changes(
@@ -76,20 +77,36 @@ impl ServerTrait for Server {
                                 continue;
                             }
                         };
+                        println!("{}", &payload);
                         if msg.get_channel_name() == room_name {
-                            let ws_msg: Result<WsMessage, _> = serde_json::from_str(payload.as_str());
-                            if let Ok(data) = ws_msg {
-                                if let WsMessage::JoinReqMsg(join_req) = data {
-                                    println!("{} is trying to join", &join_req.peer_info.username);
-                                    if *wg_ip != join_req.peer_info.wg_ip {
-                                        match sender.send(CnrsMessage::PeerDiscovered(join_req)) {
+                            let msg: Result<InfoMsg, _> = serde_json::from_str(payload.as_str());
+                            if let Ok(data) = msg {
+                                match data {
+                                    InfoMsg::JoinMsg(data) => {
+                                        println!("{} is trying to join", &data.peer_info.username);
+                                        if *wg_ip != data.peer_info.wg_ip {
+                                            match sender.send(CnrsMessage::PeerDiscovered(data)) {
+                                                Ok(_) => {}
+                                                Err(e) => {
+                                                    eprintln!("Error is sending broadcast message: {}", e)
+                                                }
+                                            };
+                                        }
+                                    },
+                                    InfoMsg::DisconnectMsg(data) => {
+                                        
+                                        match sender.send(CnrsMessage::PeerDisconnected(data)) {
                                             Ok(_) => {}
                                             Err(e) => {
                                                 eprintln!("Error is sending broadcast message: {}", e)
                                             }
                                         };
-                                    }
+                                        
+                                    },
+                                    _ => {}
                                 }
+
+
                             }
                         }
                     }
@@ -118,5 +135,29 @@ impl ServerTrait for Server {
             }
         }
         Ok(())
+    }
+    async fn send_disconnect_signal(&self, data: DisconnectReq) -> Result<(), anyhow::Error> {
+        let data = serde_json::to_string(&InfoMsg::DisconnectMsg(data))?;
+        let client = reqwest::Client::new();
+        let res = client.post(SERVER_ADDR).body(data).send().await?;
+        let status = res.status();
+        if status != 200 {
+            let data = res.text().await?;
+            anyhow::bail!("Status after post request: {}, msg: {}", status, data);
+        }
+        Ok(())
+    }
+    async fn update_connection_time(&self, data: UpdateTimerReq) -> Result<(), anyhow::Error> {
+        let data: String = serde_json::to_string(&InfoMsg::UpdateLastConnected(data))?;
+        let client = reqwest::Client::new();
+        let res = client.post(SERVER_ADDR).body(data).send().await?;
+        if res.status() == 200 {
+            return Ok(());
+        }
+        anyhow::bail!(
+            "Status after post request: {}, msg: {}",
+            res.status(),
+            res.text().await.unwrap_or("-".to_string())
+        );
     }
 }

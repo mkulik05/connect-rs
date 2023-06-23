@@ -112,6 +112,21 @@ impl Wg for KernelWg {
         .await?;
         Ok(())
     }
+    async fn remove_wg_peer(
+        &self,
+        interface_name: &str,
+        remote_pub_key: &str,
+    ) -> Result<(), anyhow::Error> {
+        run_terminal_command(
+            format!(
+                "wg set {} peer {} remove",
+                &interface_name, &remote_pub_key
+            ),
+            false,
+        )
+        .await?;
+        Ok(())
+    }
     async fn clean_wg_up(&self, interface_name: &str) -> Result<(), anyhow::Error> {
         run_terminal_command(format!("ip link del {}", &interface_name), false).await?;
         Ok(())

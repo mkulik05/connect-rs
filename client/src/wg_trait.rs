@@ -16,5 +16,10 @@ pub trait Wg: Send + Sync {
         peer_address: &str,
         remote_wg_ip: &str,
     ) -> Result<(), anyhow::Error>;
+    async fn remove_wg_peer(
+        &self,
+        interface_name: &str,
+        remote_pub_key: &str,
+    ) -> Result<(), anyhow::Error>;
     async fn clean_wg_up(&self, interface_name: &str) -> Result<(), anyhow::Error>;
 }

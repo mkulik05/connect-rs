@@ -41,16 +41,32 @@ pub struct JoinReq {
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct DisconnectReq {
+    room_name: String,
+    pub_key: String,
+    username: String
+}
+
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct UpdateTimerReq {
+    room_name: String,
+    pub_key: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct PeerInfo {
     wg_ip: String,
     pub_key: String,
     mapped_addr: String,
     username: String,
+    last_connected: String,
 }
 
 #[derive(Clone, Debug)]
 pub enum CnrsMessage {
     PeerDiscovered(JoinReq),
+    PeerDisconnected(DisconnectReq),
     Shutdown,
 }
 
@@ -101,7 +117,7 @@ async fn main() -> ExitCode {
         server.clone(),
         tx.clone(),
         &room_name,
-        username,
+        username.clone(),
         public_key.to_base64(),
         port,
         key_name,
@@ -125,6 +141,10 @@ async fn main() -> ExitCode {
                 eprintln!("Error on exit: {}", e);
             } else {
                 println!("Got it! Exiting...");
+                if let Err(e) = server.send_disconnect_signal(DisconnectReq {pub_key: public_key.to_string(), room_name, username }).await {
+                    eprintln!("Failed to send disconnect message: {}", e); 
+                }
+                
                 if let Err(e) = tx.send(CnrsMessage::Shutdown) {
                     eprintln!("Failed to send shutdown message: {}", e);
                 };
@@ -159,7 +179,8 @@ async fn join_room(
 
     let data = PeerInfo {
         wg_ip: "".to_string(),
-        pub_key,
+        last_connected: "".to_string(),
+        pub_key: pub_key.clone(),
         mapped_addr,
         username,
     };
@@ -167,8 +188,25 @@ async fn join_room(
         room_name: room_name.clone(),
         peer_info: data,
     };
-    let data = serde_json::to_string(&data)?;
     let wg_ip = server.send_peer_info(data).await?;
+
+    {
+        let pub_key = pub_key.clone();
+        let server = server.clone();
+        let room_name = room_name.clone();
+        let msg = UpdateTimerReq { room_name, pub_key };
+        tokio::spawn(async move {
+
+            loop {
+                if let Err(e) =  server
+                    .update_connection_time(msg.clone())
+                    .await {
+                        eprintln!("Error updating last connection time: {}", e);
+                    };
+                tokio::time::sleep(std::time::Duration::from_secs(3600 * 6)).await;
+            }
+        });
+    }
 
     println!("Connect info sent");
     wg.init_wg(&interface_name, port, key_name.as_str(), wg_ip.as_str())
@@ -180,29 +218,46 @@ async fn join_room(
     let interface_name = interface_name.clone();
     tokio::spawn(async move {
         while let Ok(data) = rx2.recv().await {
-            if let CnrsMessage::PeerDiscovered(join_req) = data {
-                match wg
-                    .add_wg_peer(
-                        &interface_name,
-                        &join_req.peer_info.pub_key,
-                        &join_req.peer_info.mapped_addr,
-                        &join_req.peer_info.wg_ip,
-                    )
-                    .await
-                {
-                    Ok(_) => {
-                        println!("{} joined", &join_req.peer_info.username);
-                    }
-                    Err(err) => {
-                        eprintln!("Error during initialising new connection: {:?}", err)
-                    }
-                };
+            println!("{:?}", &data);
+            match data {
+                CnrsMessage::PeerDiscovered(join_req) => {
+                    match wg
+                        .add_wg_peer(
+                            &interface_name,
+                            &join_req.peer_info.pub_key,
+                            &join_req.peer_info.mapped_addr,
+                            &join_req.peer_info.wg_ip,
+                        )
+                        .await
+                    {
+                        Ok(_) => {
+                            println!("{} joined", &join_req.peer_info.username);
+                        }
+                        Err(err) => {
+                            eprintln!("Error during initialising new connection: {:?}", err)
+                        }
+                    };
+                }
+                CnrsMessage::PeerDisconnected(disconnect_req) => {
+                    match wg
+                        .remove_wg_peer(&interface_name, &disconnect_req.pub_key)
+                        .await
+                    {
+                        Ok(_) => {
+                            println!("{} disconnected", &disconnect_req.username);
+                        }
+                        Err(err) => {
+                            eprintln!("Error during removing wg peer: {:?}", err)
+                        }
+                    };
+                }
+                _ => {}
             }
         }
     });
 
     server
-        .connect_to_each(sender.clone(), room_name, &wg_ip)
+        .connect_to_each(sender.clone(), &room_name, &wg_ip)
         .await
         .with_context(|| "Error during connection to other peers")?;
 
