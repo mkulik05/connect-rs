@@ -156,6 +156,9 @@ async fn main() -> Result<ExitCode, anyhow::Error> {
                 eprintln!("Error on exit: {}", e);
             } else {
                 println!("Got it! Exiting...");
+                if let Err(e) = tx.send(CnrsMessage::Shutdown) {
+                    eprintln!("Failed to send shutdown message: {}", e);
+                };
                 if let Err(e) = server
                     .send_disconnect_signal(DisconnectReq {
                         pub_key: public_key.to_string(),
@@ -167,9 +170,6 @@ async fn main() -> Result<ExitCode, anyhow::Error> {
                     eprintln!("Failed to send disconnect message: {}", e);
                 }
 
-                if let Err(e) = tx.send(CnrsMessage::Shutdown) {
-                    eprintln!("Failed to send shutdown message: {}", e);
-                };
                 return Ok(ExitCode::SUCCESS);
             };
         }
@@ -238,6 +238,7 @@ async fn join_room(
     tokio::spawn(async move {
         while let Ok(data) = rx2.recv().await {
             match data {
+                CnrsMessage::Shutdown => break,
                 CnrsMessage::PeerDiscovered(join_req) => {
                     match wg
                         .add_wg_peer(
@@ -269,7 +270,6 @@ async fn join_room(
                         }
                     };
                 }
-                _ => {}
             }
         }
     });
