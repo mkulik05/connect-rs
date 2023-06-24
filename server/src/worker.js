@@ -17,7 +17,7 @@ export default {
             console.log(data)
             if (data.type === "JoinMsg") {
                 let room_name = data.room_name;
-                let pub_key = data.pub_key;
+                let pub_key = data.peer_info.pub_key;
                 let len = await redis.llen(room_name);
                 if (len >= MAX_PEERS_N) {
                     return new Response('Room is full', {
@@ -26,7 +26,7 @@ export default {
                 }
                 let peers = await redis.lrange(room_name, 0, len - 1);
                 let res_index = -1;
-                for (let i = 0; i < peers.length; i++) {
+                for (let i = peers.length - 1; i >= 0; i--) {
                     if (((new Date()) - (new Date(peers[i].last_connected))) > MAX_INACTIVE_DELAY) {
                         res_index = i;
                     }
@@ -35,11 +35,11 @@ export default {
                         break
                     }
                 }
-                let num = (res_index === -1) ? len : res_index;
+                let num = (res_index === -1) ? len : len - 1 - res_index;
                 let wg_ip = get_free_wg_id(num);
                 data.peer_info.wg_ip = wg_ip;
                 data.peer_info.last_connected = new Date();
-                if (res_index == -1) {
+                if (res_index === -1) {
                     await redis.lpush(room_name, JSON.stringify(data.peer_info));
                 } else {
                     await redis.lset(room_name, res_index, JSON.stringify(data.peer_info));

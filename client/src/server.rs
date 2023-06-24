@@ -1,7 +1,6 @@
 use crate::server_trait::ServerTrait;
 use crate::CnrsMessage;
-use crate::REDIS_URL;
-use crate::SERVER_ADDR;
+use crate::Config;
 use crate::{DisconnectReq, JoinReq, PeerInfo, UpdateTimerReq};
 use async_trait::async_trait;
 use futures::prelude::*;
@@ -24,7 +23,7 @@ impl ServerTrait for Server {
     async fn send_peer_info(&self, data: JoinReq) -> Result<String, anyhow::Error> {
         let data: String = serde_json::to_string(&InfoMsg::JoinMsg(data))?;
         let client = reqwest::Client::new();
-        let res = client.post(SERVER_ADDR).body(data).send().await?;
+        let res = client.post(&Config::global().addrs.server_addr).body(data).send().await?;
         if res.status() == 200 {
             let data = res.text().await?;
             return Ok(data);
@@ -42,7 +41,7 @@ impl ServerTrait for Server {
         wg_ip: &String,
         room_name: &String,
     ) -> Result<(), anyhow::Error> {
-        let client = redis::Client::open(REDIS_URL)?;
+        let client = redis::Client::open(Config::global().addrs.redis_addr.clone())?;
         let con = client.get_tokio_connection().await?;
 
         let room_name = room_name.to_string();
@@ -77,7 +76,6 @@ impl ServerTrait for Server {
                                 continue;
                             }
                         };
-                        println!("{}", &payload);
                         if msg.get_channel_name() == room_name {
                             let msg: Result<InfoMsg, _> = serde_json::from_str(payload.as_str());
                             if let Ok(data) = msg {
@@ -121,7 +119,7 @@ impl ServerTrait for Server {
         room_name: &String,
         wg_ip: &String,
     ) -> Result<(), anyhow::Error> {
-        let client = redis::Client::open(REDIS_URL)?;
+        let client = redis::Client::open(Config::global().addrs.redis_addr.clone())?;
         let mut con = client.get_tokio_connection().await?;
         let len: isize = con.llen(room_name).await?;
         let peers: Vec<String> = con.lrange(room_name, 0, len).await?;
@@ -139,7 +137,7 @@ impl ServerTrait for Server {
     async fn send_disconnect_signal(&self, data: DisconnectReq) -> Result<(), anyhow::Error> {
         let data = serde_json::to_string(&InfoMsg::DisconnectMsg(data))?;
         let client = reqwest::Client::new();
-        let res = client.post(SERVER_ADDR).body(data).send().await?;
+        let res = client.post(&Config::global().addrs.server_addr).body(data).send().await?;
         let status = res.status();
         if status != 200 {
             let data = res.text().await?;
@@ -150,7 +148,7 @@ impl ServerTrait for Server {
     async fn update_connection_time(&self, data: UpdateTimerReq) -> Result<(), anyhow::Error> {
         let data: String = serde_json::to_string(&InfoMsg::UpdateLastConnected(data))?;
         let client = reqwest::Client::new();
-        let res = client.post(SERVER_ADDR).body(data).send().await?;
+        let res = client.post(&Config::global().addrs.server_addr).body(data).send().await?;
         if res.status() == 200 {
             return Ok(());
         }

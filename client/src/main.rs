@@ -16,23 +16,19 @@ use std::sync::atomic::{AtomicBool, Ordering};
 mod kernel_wg;
 mod server;
 mod server_trait;
+mod toml_conf;
 mod wg_trait;
 use crate::kernel_wg::KernelWg;
 use crate::server::Server;
 use crate::server_trait::ServerTrait;
+use crate::toml_conf::Config;
 use crate::wg_trait::Wg;
 
-const LOCAL_ADDR: &str = "0.0.0.0";
-const STUN_ADDR: &str = "stun.1und1.de:3478";
-const SERVER_ADDR: &str = "https://server.mishakulik2.workers.dev/";
-const REDIS_URL: &str = "rediss://client:08794a557c35bd6449abc35ed8d3128930daa4600a87a768ca79848ee31760c3@balanced-mastiff-35201.upstash.io:35201";
+const PROFILE_PATH: &str = "profile.toml";
 
-const GHOST_WG_IP: &str = "10.9.0.0";
+const GHOST_WG_IP: &str = "10.8.0.255";
 const GHOST_WG_PUB_KEY: &str = "UvtAsAD2mLgHhSqwTRkwykaNGuh3oiZg5bTwm/zf1Hs=";
 const GHOST_WG_ADDRESS: &str = "1.1.1.1:32322";
-
-const INTERFACE_PREFIX: &str = "cnrs-";
-const MAX_INTERFACE_ROOM_PART_LEN: usize = 8;
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct JoinReq {
@@ -44,9 +40,8 @@ pub struct JoinReq {
 pub struct DisconnectReq {
     room_name: String,
     pub_key: String,
-    username: String
+    username: String,
 }
-
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct UpdateTimerReq {
@@ -71,22 +66,52 @@ pub enum CnrsMessage {
 }
 
 #[tokio::main]
-async fn main() -> ExitCode {
+async fn main() -> Result<ExitCode, anyhow::Error> {
+    let args: Vec<String> = std::env::args().collect();
+
+    if args.len() == 1 {
+        println!("To generate new connection config enter required info");
+        let room_name = read_str_from_cli(String::from("Input room id: "));
+        let username = read_str_from_cli(String::from("\nInput your username: "));
+        let conf_path = read_str_from_cli(String::from("\nInput new config path: "));
+        if let Err(err) = Config::generate(
+            PROFILE_PATH,
+            conf_path.as_str(),
+            username.as_str(),
+            room_name.as_str(),
+        ) {
+            eprintln!("Error during profile generation {}", err);
+            return Ok(ExitCode::from(1));
+        };
+        println!("Your config was savet to {}", conf_path);
+        return Ok(ExitCode::SUCCESS);
+    } else {
+        let conf_path = args[1].clone();
+        let profile = Config::from_file(conf_path.as_str());
+        if let Err(err) = profile {
+            eprintln!("Error during profile loading {}", err);
+            return Ok(ExitCode::from(1));
+        };
+    }
+    let priv_key = Privkey::from_base64(Config::global().peer.priv_key.as_str())?;
+    let interface_name = Config::global().interface.interface_name.clone();
+    let room_name = Config::global().peer.room_name.clone();
+    let username = Config::global().peer.username.clone();
+
     if !Uid::effective().is_root() {
         println!("You should run this app with root permissions");
-        return ExitCode::from(1);
+        return Ok(ExitCode::from(1));
     }
 
     let port = get_unused_port();
     println!("Working with port {}\n", port);
 
-    let private_key = Privkey::generate();
-    let public_key = private_key.pubkey();
+    let public_key = priv_key.pubkey();
     let key_name = Local::now()
         .format("/tmp/connect-wg-%Y_%m_%d_%H_%M_%S.key")
         .to_string();
 
-    match write(&key_name, private_key.to_base64().as_bytes()).await {
+    match write(&key_name, priv_key.to_base64().as_bytes()).await {
         Ok(_) => {}
         Err(e) => eprintln!("Error saving key: {}", e),
     };
@@ -94,21 +119,11 @@ async fn main() -> ExitCode {
     println!(
         "Public key: {}\nPrivate key: {}\n",
         &public_key.to_base64(),
-        &private_key.to_base64()
+        &priv_key.to_base64()
     );
-
-    let room_name: String = read_str_from_cli(String::from("Input room id: "));
-    let username = read_str_from_cli(String::from("\nInput your username: "));
 
     println!("\nJoining room... GLHF");
 
-    let interface_name = INTERFACE_PREFIX.to_owned() + {
-        if room_name.len() <= MAX_INTERFACE_ROOM_PART_LEN {
-            &room_name
-        } else {
-            &room_name[..MAX_INTERFACE_ROOM_PART_LEN]
-        }
-    };
     let (tx, _) = broadcast::channel(16);
     let wg: Arc<dyn Wg> = Arc::new(KernelWg {});
     let server: Arc<dyn ServerTrait> = Arc::new(Server {});
@@ -141,20 +156,27 @@ async fn main() -> ExitCode {
                 eprintln!("Error on exit: {}", e);
             } else {
                 println!("Got it! Exiting...");
-                if let Err(e) = server.send_disconnect_signal(DisconnectReq {pub_key: public_key.to_string(), room_name, username }).await {
-                    eprintln!("Failed to send disconnect message: {}", e); 
+                if let Err(e) = server
+                    .send_disconnect_signal(DisconnectReq {
+                        pub_key: public_key.to_string(),
+                        room_name,
+                        username,
+                    })
+                    .await
+                {
+                    eprintln!("Failed to send disconnect message: {}", e);
                 }
-                
+
                 if let Err(e) = tx.send(CnrsMessage::Shutdown) {
                     eprintln!("Failed to send shutdown message: {}", e);
                 };
-                return ExitCode::SUCCESS;
+                return Ok(ExitCode::SUCCESS);
             };
         }
         Err(err) => eprintln!("Joining room failed: {}", err),
     };
 
-    ExitCode::SUCCESS
+    Ok(ExitCode::SUCCESS)
 }
 
 async fn join_room(
@@ -170,7 +192,7 @@ async fn join_room(
 ) -> Result<(), anyhow::Error> {
     let mapped_addr = loop {
         println!("Geting mapped address");
-        match get_mapped_addr(LOCAL_ADDR, port).await {
+        match get_mapped_addr(&Config::global().addrs.local_addr, port).await {
             Ok(addr) => break addr,
             Err(e) => eprintln!("{}", e),
         }
@@ -196,13 +218,10 @@ async fn join_room(
         let room_name = room_name.clone();
         let msg = UpdateTimerReq { room_name, pub_key };
         tokio::spawn(async move {
-
             loop {
-                if let Err(e) =  server
-                    .update_connection_time(msg.clone())
-                    .await {
-                        eprintln!("Error updating last connection time: {}", e);
-                    };
+                if let Err(e) = server.update_connection_time(msg.clone()).await {
+                    eprintln!("Error updating last connection time: {}", e);
+                };
                 tokio::time::sleep(std::time::Duration::from_secs(3600 * 6)).await;
             }
         });
@@ -218,7 +237,6 @@ async fn join_room(
     let interface_name = interface_name.clone();
     tokio::spawn(async move {
         while let Ok(data) = rx2.recv().await {
-            println!("{:?}", &data);
             match data {
                 CnrsMessage::PeerDiscovered(join_req) => {
                     match wg
@@ -285,7 +303,9 @@ fn read_str_from_cli(msg: String) -> String {
 
 async fn get_mapped_addr(addr: &str, port: u16) -> Result<String, anyhow::Error> {
     let mut client = Client::new(format!("{}:{}", addr, port), None).await?;
-    let res = client.binding_request(STUN_ADDR, None).await?;
+    let res = client
+        .binding_request(&Config::global().addrs.stun_addr, None)
+        .await?;
     let class = res.get_class();
     if class != Class::SuccessResponse {
         anyhow::bail!("Invalid response class: {:?}", class)
