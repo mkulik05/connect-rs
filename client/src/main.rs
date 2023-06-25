@@ -93,10 +93,10 @@ async fn main() -> Result<ExitCode, anyhow::Error> {
             return Ok(ExitCode::from(1));
         };
     }
-    let priv_key = Privkey::from_base64(Config::global().peer.priv_key.as_str())?;
+    let priv_key = Privkey::from_base64(Config::global().room.priv_key.as_str())?;
     let interface_name = Config::global().interface.interface_name.clone();
-    let room_name = Config::global().peer.room_name.clone();
-    let username = Config::global().peer.username.clone();
+    let room_name = Config::global().room.room_name.clone();
+    let username = Config::global().room.username.clone();
 
     if !Uid::effective().is_root() {
         println!("You should run this app with root permissions");
@@ -192,7 +192,7 @@ async fn join_room(
 ) -> Result<(), anyhow::Error> {
     let mapped_addr = loop {
         println!("Geting mapped address");
-        match get_mapped_addr(&Config::global().addrs.local_addr, port).await {
+        match get_mapped_addr("0.0.0.0", port).await {
             Ok(addr) => break addr,
             Err(e) => eprintln!("{}", e),
         }
