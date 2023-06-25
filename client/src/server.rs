@@ -125,7 +125,7 @@ impl ServerTrait for Server {
         let peers: Vec<String> = con.lrange(room_name, 0, len).await?;
         for peer in peers {
             let peer_info: PeerInfo = serde_json::from_str(peer.as_str())?;
-            if peer_info.wg_ip != *wg_ip {
+            if peer_info.is_online && peer_info.wg_ip != *wg_ip {
                 sender.send(CnrsMessage::PeerDiscovered(JoinReq {
                     room_name: room_name.to_string(),
                     peer_info,

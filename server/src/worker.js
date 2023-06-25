@@ -47,6 +47,20 @@ export default {
                 await redis.publish(room_name, JSON.stringify(data))
                 return new Response(wg_ip);
             } else if (data.type === "DisconnectMsg") {
+                let len = await redis.llen(data.room_name);
+                let peers = await redis.lrange(data.room_name, 0, len - 1);
+                let res_i = -1;
+                for (let i = 0; i < peers.length; i++) {
+                    if (data.pub_key === peers[i].pub_key) {
+                        res_i = i
+                        break
+                    }
+                }
+                if (res_i !== -1) {
+                    let res_data = peers[res_i];
+                    res_data.is_online = false;
+                    await redis.lset(data.room_name, res_i, JSON.stringify(res_data)); 
+                }
                 await redis.publish(data.room_name, JSON.stringify(data));
                 return new Response('OK');
             } else if (data.type === "UpdateLastConnected") {

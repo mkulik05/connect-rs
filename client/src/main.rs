@@ -56,6 +56,7 @@ pub struct PeerInfo {
     mapped_addr: String,
     username: String,
     last_connected: String,
+    is_online: bool
 }
 
 #[derive(Clone, Debug)]
@@ -203,6 +204,7 @@ async fn join_room(
         wg_ip: "".to_string(),
         last_connected: "".to_string(),
         pub_key: pub_key.clone(),
+        is_online: true,
         mapped_addr,
         username,
     };
