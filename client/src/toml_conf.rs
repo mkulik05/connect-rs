@@ -6,7 +6,6 @@ const MAX_CUSTOM_PART_LEN: usize = 8;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Addrs {
-    pub local_addr: String,
     pub stun_addr: String,
     pub server_addr: String,
     pub redis_addr: String,
@@ -18,7 +17,7 @@ pub struct Interface {
 }
 
 #[derive(Deserialize, Serialize, Debug)]
-pub struct Peer {
+pub struct Room {
     pub room_name: String,
     pub username: String,
     pub priv_key: String,
@@ -26,9 +25,9 @@ pub struct Peer {
 
 #[derive(Deserialize, Serialize, Debug)]
 pub struct Config {
-    pub addrs: Addrs,
+    pub room: Room,
     pub interface: Interface,
-    pub peer: Peer,
+    pub addrs: Addrs,
 }
 
 pub static INSTANCE: OnceCell<Config> = OnceCell::new();
@@ -47,9 +46,9 @@ impl Config {
         let pattern_config = std::fs::read_to_string(pattern_path)?;
         let mut conf: Config = toml::from_str(pattern_config.as_str())?;
         let private_key = wireguard_keys::Privkey::generate();
-        conf.peer.room_name = room_name.to_string();
-        conf.peer.username = username.to_string();
-        conf.peer.priv_key = private_key.to_base64();
+        conf.room.room_name = room_name.to_string();
+        conf.room.username = username.to_string();
+        conf.room.priv_key = private_key.to_base64();
         conf.interface.interface_name = INTERFACE_PREFIX.to_string() + {
             if room_name.len() <= MAX_CUSTOM_PART_LEN {
                 room_name
