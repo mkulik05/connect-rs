@@ -1,7 +1,11 @@
 use crate::wg_trait::Wg;
-use crate::{GHOST_WG_ADDRESS, GHOST_WG_IP, GHOST_WG_PUB_KEY};
 use async_trait::async_trait;
 use std::process::Command;
+
+const GHOST_WG_IP: &str = "10.8.0.255";
+const GHOST_WG_PUB_KEY: &str = "UvtAsAD2mLgHhSqwTRkwykaNGuh3oiZg5bTwm/zf1Hs=";
+const GHOST_WG_ADDRESS: &str = "1.1.1.1:32322";
+
 #[derive(Clone)]
 pub struct KernelWg {}
 

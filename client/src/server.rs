@@ -1,7 +1,6 @@
+use crate::app_backend::{CnrsMessage, DisconnectReq, JoinReq, PeerInfo, UpdateTimerReq};
+use crate::toml_conf::Config;
 use crate::server_trait::ServerTrait;
-use crate::CnrsMessage;
-use crate::Config;
-use crate::{DisconnectReq, JoinReq, PeerInfo, UpdateTimerReq};
 use async_trait::async_trait;
 use futures::prelude::*;
 use redis::AsyncCommands;
@@ -23,7 +22,11 @@ impl ServerTrait for Server {
     async fn send_peer_info(&self, data: JoinReq) -> Result<String, anyhow::Error> {
         let data: String = serde_json::to_string(&InfoMsg::JoinMsg(data))?;
         let client = reqwest::Client::new();
-        let res = client.post(&Config::global().addrs.server_addr).body(data).send().await?;
+        let res = client
+            .post(&Config::global().addrs.server_addr)
+            .body(data)
+            .send()
+            .await?;
         if res.status() == 200 {
             let data = res.text().await?;
             return Ok(data);
@@ -92,14 +95,14 @@ impl ServerTrait for Server {
                                         }
                                     },
                                     InfoMsg::DisconnectMsg(data) => {
-                                        
+
                                         match sender.send(CnrsMessage::PeerDisconnected(data)) {
                                             Ok(_) => {}
                                             Err(e) => {
                                                 eprintln!("Error is sending broadcast message: {}", e)
                                             }
                                         };
-                                        
+
                                     },
                                     _ => {}
                                 }
@@ -137,7 +140,11 @@ impl ServerTrait for Server {
     async fn send_disconnect_signal(&self, data: DisconnectReq) -> Result<(), anyhow::Error> {
         let data = serde_json::to_string(&InfoMsg::DisconnectMsg(data))?;
         let client = reqwest::Client::new();
-        let res = client.post(&Config::global().addrs.server_addr).body(data).send().await?;
+        let res = client
+            .post(&Config::global().addrs.server_addr)
+            .body(data)
+            .send()
+            .await?;
         let status = res.status();
         if status != 200 {
             let data = res.text().await?;
@@ -148,7 +155,11 @@ impl ServerTrait for Server {
     async fn update_connection_time(&self, data: UpdateTimerReq) -> Result<(), anyhow::Error> {
         let data: String = serde_json::to_string(&InfoMsg::UpdateLastConnected(data))?;
         let client = reqwest::Client::new();
-        let res = client.post(&Config::global().addrs.server_addr).body(data).send().await?;
+        let res = client
+            .post(&Config::global().addrs.server_addr)
+            .body(data)
+            .send()
+            .await?;
         if res.status() == 200 {
             return Ok(());
         }
