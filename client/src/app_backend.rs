@@ -1,4 +1,4 @@
-use anyhow::Context;
+use anyhow::{Context, anyhow};
 use chrono::prelude::*;
 use nix::unistd::Uid;
 use rand::Rng;
@@ -11,7 +11,6 @@ use tokio::sync::broadcast;
 use tokio::sync::broadcast::Sender;
 use wireguard_keys::{self, Privkey};
 extern crate redis;
-use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
 use crate::kernel_wg::KernelWg;
 use crate::server::Server;
@@ -57,7 +56,7 @@ pub enum CnrsMessage {
     Shutdown,
 }
 
-pub async fn start_backend() -> Result<ExitCode, anyhow::Error> {
+pub async fn start_backend() -> Result<(), anyhow::Error> {
     let args: Vec<String> = std::env::args().collect();
 
     if args.len() == 1 {
@@ -72,16 +71,16 @@ pub async fn start_backend() -> Result<ExitCode, anyhow::Error> {
             room_name.as_str(),
         ) {
             eprintln!("Error during profile generation {}", err);
-            return Ok(ExitCode::from(1));
+            anyhow::bail!("Failed to generate profile");
         };
         println!("Your config was savet to {}", conf_path);
-        return Ok(ExitCode::SUCCESS);
+        return Ok(());
     } else {
         let conf_path = args[1].clone();
         let profile = Config::from_file(conf_path.as_str());
         if let Err(err) = profile {
             eprintln!("Error during profile loading {}", err);
-            return Ok(ExitCode::from(1));
+            anyhow::bail!("Failed to load profile");
         };
     }
     let priv_key = Privkey::from_base64(Config::global().room.priv_key.as_str())?;
@@ -91,7 +90,7 @@ pub async fn start_backend() -> Result<ExitCode, anyhow::Error> {
 
     if !Uid::effective().is_root() {
         println!("You should run this app with root permissions");
-        return Ok(ExitCode::from(1));
+        return Ok(());
     }
 
     let port = get_unused_port();
@@ -161,13 +160,13 @@ pub async fn start_backend() -> Result<ExitCode, anyhow::Error> {
                     eprintln!("Failed to send disconnect message: {}", e);
                 }
 
-                return Ok(ExitCode::SUCCESS);
+                return Ok(());
             };
         }
         Err(err) => eprintln!("Joining room failed: {}", err),
     };
 
-    Ok(ExitCode::SUCCESS)
+    Ok(())
 }
 
 async fn join_room(
@@ -220,7 +219,7 @@ async fn join_room(
     }
 
     println!("Connect info sent");
-    wg.init_wg(&interface_name, port, key_name.as_str(), wg_ip.as_str())
+    wg.init_wg(interface_name, port, key_name.as_str(), wg_ip.as_str())
         .await
         .with_context(|| "failed to init wg")?;
 
@@ -267,12 +266,12 @@ async fn join_room(
     });
 
     server
-        .connect_to_each(sender.clone(), &room_name, &wg_ip)
+        .connect_to_each(sender.clone(), room_name, &wg_ip)
         .await
         .with_context(|| "Error during connection to other peers")?;
 
     server
-        .sub_to_changes(sender.clone(), &wg_ip, &room_name)
+        .sub_to_changes(sender.clone(), &wg_ip, room_name)
         .await?;
 
     Ok(())
@@ -280,10 +279,10 @@ async fn join_room(
 
 fn get_unused_port() -> u16 {
     let port = rand::thread_rng().gen_range(5000..20000);
-    if let Ok(_) = TcpListener::bind(("localhost", port)) {
+    if TcpListener::bind(("localhost", port)).is_ok() {
         return port;
     }
-    return get_unused_port();
+    get_unused_port()
 }
 
 fn read_str_from_cli(msg: String) -> String {

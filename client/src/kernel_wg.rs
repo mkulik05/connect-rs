@@ -84,7 +84,7 @@ impl Wg for KernelWg {
         key_path: &str,
         my_wg_ip: &str,
     ) -> Result<(), anyhow::Error> {
-        if !KernelWg::interface_exists(&interface_name).await? {
+        if !KernelWg::interface_exists(interface_name).await? {
             KernelWg::create_wg_interface(interface_name).await?;
         }
         KernelWg::configure_wg(interface_name, port, key_path).await?;
@@ -96,7 +96,7 @@ impl Wg for KernelWg {
             GHOST_WG_IP,
         )
         .await?;
-        KernelWg::start_interface(&interface_name).await?;
+        KernelWg::start_interface(interface_name).await?;
         Ok(())
     }
     async fn add_wg_peer(
