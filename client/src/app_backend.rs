@@ -1,4 +1,4 @@
-use anyhow::{Context, anyhow};
+use anyhow::Context;
 use chrono::prelude::*;
 use nix::unistd::Uid;
 use rand::Rng;
@@ -7,18 +7,15 @@ use std::net::TcpListener;
 use std::sync::Arc;
 use stun_client::*;
 use tokio::fs::write;
-use tokio::sync::broadcast;
 use tokio::sync::broadcast::Sender;
 use wireguard_keys::{self, Privkey};
 extern crate redis;
-use std::sync::atomic::{AtomicBool, Ordering};
 use crate::kernel_wg::KernelWg;
 use crate::server::Server;
 use crate::server_trait::ServerTrait;
+use crate::table_data::TableData;
 use crate::toml_conf::Config;
 use crate::wg_trait::Wg;
-
-const PROFILE_PATH: &str = "profile.toml";
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct JoinReq {
@@ -46,7 +43,7 @@ pub struct PeerInfo {
     pub mapped_addr: String,
     pub username: String,
     pub last_connected: String,
-    pub is_online: bool
+    pub is_online: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -54,35 +51,14 @@ pub enum CnrsMessage {
     PeerDiscovered(JoinReq),
     PeerDisconnected(DisconnectReq),
     Shutdown,
+    FinishedDisconnecting,
 }
 
-pub async fn start_backend() -> Result<(), anyhow::Error> {
-    let args: Vec<String> = std::env::args().collect();
-
-    if args.len() == 1 {
-        println!("To generate new connection config enter required info");
-        let room_name = read_str_from_cli(String::from("Input room id: "));
-        let username = read_str_from_cli(String::from("\nInput your username: "));
-        let conf_path = read_str_from_cli(String::from("\nInput new config path: "));
-        if let Err(err) = Config::generate(
-            PROFILE_PATH,
-            conf_path.as_str(),
-            username.as_str(),
-            room_name.as_str(),
-        ) {
-            eprintln!("Error during profile generation {}", err);
-            anyhow::bail!("Failed to generate profile");
-        };
-        println!("Your config was savet to {}", conf_path);
-        return Ok(());
-    } else {
-        let conf_path = args[1].clone();
-        let profile = Config::from_file(conf_path.as_str());
-        if let Err(err) = profile {
-            eprintln!("Error during profile loading {}", err);
-            anyhow::bail!("Failed to load profile");
-        };
-    }
+pub async fn start_backend(
+    sender: Sender<CnrsMessage>,
+    display: Arc<TableData>,
+    my_wg_ip: &mut String,
+) -> Result<(), anyhow::Error> {
     let priv_key = Privkey::from_base64(Config::global().room.priv_key.as_str())?;
     let interface_name = Config::global().interface.interface_name.clone();
     let room_name = Config::global().room.room_name.clone();
@@ -94,7 +70,7 @@ pub async fn start_backend() -> Result<(), anyhow::Error> {
     }
 
     let port = get_unused_port();
-    println!("Working with port {}\n", port);
+    // println!("Working with port {}\n", port);
 
     let public_key = priv_key.pubkey();
     let key_name = Local::now()
@@ -106,21 +82,22 @@ pub async fn start_backend() -> Result<(), anyhow::Error> {
         Err(e) => eprintln!("Error saving key: {}", e),
     };
 
-    println!(
-        "Public key: {}\nPrivate key: {}\n",
-        &public_key.to_base64(),
-        &priv_key.to_base64()
-    );
+    // println!(
+    //     "Public key: {}\nPrivate key: {}\n",
+    //     &public_key.to_base64(),
+    //     &priv_key.to_base64()
+    // );
 
-    println!("\nJoining room... GLHF");
+    // println!("\nJoining room... GLHF");
 
-    let (tx, _) = broadcast::channel(16);
     let wg: Arc<dyn Wg> = Arc::new(KernelWg {});
     let server: Arc<dyn ServerTrait> = Arc::new(Server {});
-    match join_room(
+
+    let wg_ip_res = join_room(
+        display,
         wg.clone(),
         server.clone(),
-        tx.clone(),
+        sender.clone(),
         &room_name,
         username.clone(),
         public_key.to_base64(),
@@ -128,48 +105,16 @@ pub async fn start_backend() -> Result<(), anyhow::Error> {
         key_name,
         &interface_name,
     )
-    .await
-    {
-        Ok(_) => {
-            println!("Joined room: {}", room_name);
-            let running = Arc::new(AtomicBool::new(true));
-            let r = running.clone();
-
-            ctrlc::set_handler(move || {
-                r.store(false, Ordering::SeqCst);
-            })
-            .expect("Error setting Ctrl-C handler");
-
-            println!("Waiting for Ctrl-C...");
-            while running.load(Ordering::SeqCst) {}
-            if let Err(e) = wg.clean_wg_up(interface_name.as_str()).await {
-                eprintln!("Error on exit: {}", e);
-            } else {
-                println!("Got it! Exiting...");
-                if let Err(e) = tx.send(CnrsMessage::Shutdown) {
-                    eprintln!("Failed to send shutdown message: {}", e);
-                };
-                if let Err(e) = server
-                    .send_disconnect_signal(DisconnectReq {
-                        pub_key: public_key.to_string(),
-                        room_name,
-                        username,
-                    })
-                    .await
-                {
-                    eprintln!("Failed to send disconnect message: {}", e);
-                }
-
-                return Ok(());
-            };
-        }
-        Err(err) => eprintln!("Joining room failed: {}", err),
+    .await;
+    match wg_ip_res {
+        Ok(ip) => *my_wg_ip = ip,
+        Err(e) => anyhow::bail!("Joining room failed: {}", e),
     };
-
     Ok(())
 }
 
 async fn join_room(
+    display: Arc<TableData>,
     wg: Arc<dyn Wg>,
     server: Arc<dyn ServerTrait>,
     sender: Sender<CnrsMessage>,
@@ -179,23 +124,23 @@ async fn join_room(
     port: u16,
     key_name: String,
     interface_name: &String,
-) -> Result<(), anyhow::Error> {
+) -> Result<String, anyhow::Error> {
     let mapped_addr = loop {
-        println!("Geting mapped address");
+        // println!("Geting mapped address");
         match get_mapped_addr("0.0.0.0", port).await {
             Ok(addr) => break addr,
             Err(e) => eprintln!("{}", e),
         }
     };
-    println!("Mapped address: {}\n", mapped_addr);
+    // println!("Mapped address: {}\n", mapped_addr);
 
     let data = PeerInfo {
         wg_ip: "".to_string(),
         last_connected: "".to_string(),
         pub_key: pub_key.clone(),
         is_online: true,
+        username: username.clone(),
         mapped_addr,
-        username,
     };
     let data = JoinReq {
         room_name: room_name.clone(),
@@ -218,7 +163,7 @@ async fn join_room(
         });
     }
 
-    println!("Connect info sent");
+    // println!("Connect info sent");
     wg.init_wg(interface_name, port, key_name.as_str(), wg_ip.as_str())
         .await
         .with_context(|| "failed to init wg")?;
@@ -226,44 +171,73 @@ async fn join_room(
     let mut rx2 = sender.subscribe();
     let wg = wg.clone();
     let interface_name = interface_name.clone();
-    tokio::spawn(async move {
-        while let Ok(data) = rx2.recv().await {
-            match data {
-                CnrsMessage::Shutdown => break,
-                CnrsMessage::PeerDiscovered(join_req) => {
-                    match wg
-                        .add_wg_peer(
-                            &interface_name,
-                            &join_req.peer_info.pub_key,
-                            &join_req.peer_info.mapped_addr,
-                            &join_req.peer_info.wg_ip,
-                        )
-                        .await
-                    {
-                        Ok(_) => {
-                            println!("{} joined", &join_req.peer_info.username);
+    let pub_key = pub_key.clone();
+    {
+        let sender = sender.clone();
+        let server = server.clone();
+        let room_name = room_name.clone();
+        tokio::spawn(async move {
+            loop {
+                if let Ok(data) = rx2.recv().await {
+                    match data {
+                        CnrsMessage::Shutdown => {
+                            if let Err(e) = wg.clean_wg_up(interface_name.as_str()).await {
+                                eprintln!("Error on exit: {}", e);
+                            }
+                            if let Err(e) = server
+                                .send_disconnect_signal(DisconnectReq {
+                                    room_name: room_name.to_string(),
+                                    pub_key,
+                                    username,
+                                })
+                                .await
+                            {
+                                eprintln!("Failed to send disconnect message: {}", e);
+                            }
+                            if let Err(e) = sender.send(CnrsMessage::FinishedDisconnecting) {
+                                eprintln!("Failed to semd stopped signal: {}", e);
+                            };
+                            break;
                         }
-                        Err(err) => {
-                            eprintln!("Error during initialising new connection: {:?}", err)
+                        CnrsMessage::PeerDiscovered(join_req) => {
+                            match wg
+                                .add_wg_peer(
+                                    &interface_name,
+                                    &join_req.peer_info.pub_key,
+                                    &join_req.peer_info.mapped_addr,
+                                    &join_req.peer_info.wg_ip,
+                                )
+                                .await
+                            {
+                                Ok(_) => {
+                                    display.add_peer(&join_req.peer_info).await;
+                                    // println!("{} joined", &join_req.peer_info.username);
+                                }
+                                Err(err) => {
+                                    eprintln!("Error during initialising new connection: {:?}", err)
+                                }
+                            };
                         }
-                    };
-                }
-                CnrsMessage::PeerDisconnected(disconnect_req) => {
-                    match wg
-                        .remove_wg_peer(&interface_name, &disconnect_req.pub_key)
-                        .await
-                    {
-                        Ok(_) => {
-                            println!("{} disconnected", &disconnect_req.username);
+                        CnrsMessage::PeerDisconnected(disconnect_req) => {
+                            match wg
+                                .remove_wg_peer(&interface_name, &disconnect_req.pub_key)
+                                .await
+                            {
+                                Ok(_) => {
+                                    display.remove_peer(&disconnect_req).await;
+                                    // println!("{} disconnected", &disconnect_req.username);
+                                }
+                                Err(err) => {
+                                    eprintln!("Error during removing wg peer: {:?}", err)
+                                }
+                            };
                         }
-                        Err(err) => {
-                            eprintln!("Error during removing wg peer: {:?}", err)
-                        }
-                    };
+                        _ => {}
+                    }
                 }
             }
-        }
-    });
+        });
+    }
 
     server
         .connect_to_each(sender.clone(), room_name, &wg_ip)
@@ -274,7 +248,7 @@ async fn join_room(
         .sub_to_changes(sender.clone(), &wg_ip, room_name)
         .await?;
 
-    Ok(())
+    Ok(wg_ip)
 }
 
 fn get_unused_port() -> u16 {
@@ -285,7 +259,7 @@ fn get_unused_port() -> u16 {
     get_unused_port()
 }
 
-fn read_str_from_cli(msg: String) -> String {
+pub fn read_str_from_cli(msg: String) -> String {
     println!("{msg}");
     let mut input = String::new();
     std::io::stdin().read_line(&mut input).unwrap();

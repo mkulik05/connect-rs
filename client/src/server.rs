@@ -84,7 +84,7 @@ impl ServerTrait for Server {
                             if let Ok(data) = msg {
                                 match data {
                                     InfoMsg::JoinMsg(data) => {
-                                        println!("{} is trying to join", &data.peer_info.username);
+                                        // println!("{} is trying to join", &data.peer_info.username);
                                         if *wg_ip != data.peer_info.wg_ip {
                                             match sender.send(CnrsMessage::PeerDiscovered(data)) {
                                                 Ok(_) => {}
