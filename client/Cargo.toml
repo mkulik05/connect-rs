@@ -10,6 +10,7 @@ anyhow = "1.0.71"
 async-trait = "0.1.68"
 chrono = "0.4.26"
 clap = { version = "4.3.8", features = ["derive"] }
+crossterm = "0.26.1"
 ctrlc = "3.4.0"
 futures = "0.3.28"
 nix = "0.26.2"
@@ -20,6 +21,7 @@ reqwest = { version = "0.11.18", features = ["rustls-tls", "rustls"], default-fe
 serde = { version = "1.0.163", features = ["derive"] }
 serde_json = "1.0.96"
 stun-client = "0.1.2"
+surge-ping = "0.8.0"
 tokio = { version = "1.28.2", features = ["full"] }
 toml = "0.7.4"
 wireguard-keys = "0.1.1"
