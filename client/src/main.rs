@@ -73,16 +73,18 @@ async fn main() -> Result<(), anyhow::Error> {
         "Room: {}\n\n{:^15} {:^15} {:^8}",
         Config::global().room.room_name.as_str(), "USERNAME", "Local IP", "PING"
     );
+    let mut username = Config::global().room.username.clone();
+    username.truncate(15);
     println!(
         "{:<15} {:^15} {:^8}",
-        &Config::global().room.username,
+        username,
         my_wg_ip,
         "-"
     );
     stdout.execute(cursor::SavePosition)?;
     while running.load(Ordering::SeqCst) {
         update_table(&mut stdout, &peers).await?;
-        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
     }
     stdout.execute(Clear(ClearType::All)).unwrap();
     if let Err(e) = tx.send(app_backend::CnrsMessage::Shutdown) {
@@ -101,9 +103,10 @@ async fn main() -> Result<(), anyhow::Error> {
 }
 
 async fn update_table(stdout: &mut Stdout, peers: &TableData) -> Result<(), anyhow::Error> {
+    let peers = &(*peers.data.read().await);
     stdout.execute(cursor::RestorePosition)?;
     stdout.execute(Clear(ClearType::FromCursorDown))?;
-    for peer in &(*peers.data.read().await) {
+    for peer in peers {
         let ping_millis = peer.ping.load(Ordering::SeqCst);
         let ping_str = match ping_millis {
             u16::MAX => "-".to_string(),

@@ -1,0 +1,12 @@
+[room]
+room_name = "abcdabcdabcdabcdabcd"
+username = "mkul1k"
+priv_key = "OB1FTfewqVMQkzfk987YxR9wj+j11Y041CKYFPW7v3w="
+
+[interface]
+interface_name = "cnrs-abcdabcd"
+
+[addrs]
+stun_addr = "stun.1und1.de:3478"
+server_addr = "https://server.mishakulik2.workers.dev/"
+redis_addr = "rediss://client:08794a557c35bd6449abc35ed8d3128930daa4600a87a768ca79848ee31760c3@balanced-mastiff-35201.upstash.io:35201"

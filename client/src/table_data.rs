@@ -1,11 +1,11 @@
-use crate::app_backend::{CnrsMessage, DisconnectReq, PeerInfo};
+use crate::app_backend::{DisconnectReq, PeerInfo};
 use crate::update_table;
 use std::io::stdout;
 use std::sync::{
     atomic::{AtomicU16, Ordering},
     Arc,
 };
-use tokio::sync::{broadcast::Sender, RwLock};
+use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
 
 #[derive(Debug)]
