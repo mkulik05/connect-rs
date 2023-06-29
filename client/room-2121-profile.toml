@@ -1,10 +1,10 @@
 [room]
-room_name = "testroom31922"
-username = "mkulik"
-priv_key = "sP/pIojq6Bst9n1Fn/9kSltrSYGaDz6Be4nW2Yn1/kM="
+room_name = "room-2121"
+username = "mk"
+priv_key = "IBXInFjefNHcYHt7yIXz9rpMEU/iqiKiyulbFJHtlVk="
 
 [interface]
-interface_name = "cnrs-testroom"
+interface_name = "cnrs-room-212"
 
 [addrs]
 stun_addr = "stun.1und1.de:3478"

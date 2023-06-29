@@ -7,6 +7,7 @@ mod toml_conf;
 mod wg_trait;
 
 use crate::toml_conf::Config;
+use clap::{Args, Parser, Subcommand};
 use crossterm::style::Print;
 use crossterm::terminal::{Clear, ClearType};
 use crossterm::{cursor, ExecutableCommand, QueueableCommand};
@@ -18,35 +19,75 @@ use tokio::sync::broadcast;
 
 const PROFILE_PATH: &str = "profile.toml";
 
+#[derive(Parser)]
+#[command(author, version, about, long_about = None)]
+#[command(propagate_version = true)]
+struct Cli {
+    #[command(subcommand)]
+    command: Commands,
+}
+
+#[derive(Subcommand)]
+enum Commands {
+    /// Generate new connection profile
+    Generate(GenerateArgs),
+
+    /// Join room with information from profile
+    Join(JoinArgs),
+}
+
+#[derive(Args)]
+struct GenerateArgs {
+    room_name: String,
+    username: String,
+}
+
+#[derive(Args)]
+struct JoinArgs {
+    profile: String,
+}
+
 #[tokio::main]
 async fn main() -> Result<(), anyhow::Error> {
-    let args: Vec<String> = std::env::args().collect();
+    let cli = Cli::parse();
+    match &cli.command {
+        Commands::Generate(args) => {
+            println!(
+                "Generating config with this information:\n\nroom name: {}\nusername: {}",
+                args.room_name, args.username
+            );
 
-    if args.len() == 1 {
-        println!("To generate new connection config enter required info");
-        let room_name = app_backend::read_str_from_cli(String::from("Input room id: "));
-        let username = app_backend::read_str_from_cli(String::from("\nInput your username: "));
-        let conf_path = app_backend::read_str_from_cli(String::from("\nInput new config path: "));
-        if let Err(err) = Config::generate(
-            PROFILE_PATH,
-            conf_path.as_str(),
-            username.as_str(),
-            room_name.as_str(),
-        ) {
-            eprintln!("Error during profile generation {}", err);
-            anyhow::bail!("Failed to generate profile");
-        };
-        println!("Your config was saved to {}", conf_path);
-        return Ok(());
+            let mut conf_path = format!("{}-profile.toml", args.room_name);
+            if std::path::Path::new(&conf_path).exists() {
+                println!("\nFile {} already exists", conf_path);
+                let new_conf_path = 
+                    app_backend::read_str_from_cli(String::from("Input new config path (empty to rewrite existing config): "));
+                if !new_conf_path.is_empty() {
+                    conf_path = new_conf_path;
+                }
+            }
+            if let Err(err) = Config::generate(
+                PROFILE_PATH,
+                conf_path.as_str(),
+                args.username.as_str(),
+                args.room_name.as_str(),
+            ) {
+                eprintln!("Error during profile generation {}", err);
+                anyhow::bail!("Failed to generate profile");
+            };
+            println!("Your config was saved to {}", conf_path);
+            return Ok(());
+        },
+        Commands::Join(args) => {
+            println!("Starting connection...");
+            let conf_path = args.profile.clone();
+            let profile = Config::from_file(conf_path.as_str());
+            if let Err(err) = profile {
+                eprintln!("Error during profile loading {}", err);
+                anyhow::bail!("Failed to load profile");
+            };
+        }
     }
-    println!("Starting connection...");
-
-    let conf_path = args[1].clone();
-    let profile = Config::from_file(conf_path.as_str());
-    if let Err(err) = profile {
-        eprintln!("Error during profile loading {}", err);
-        anyhow::bail!("Failed to load profile");
-    };
 
     let mut my_wg_ip = String::new();
     let (tx, _) = broadcast::channel(16);
@@ -70,17 +111,15 @@ async fn main() -> Result<(), anyhow::Error> {
     stdout.execute(Clear(ClearType::All))?;
     stdout.execute(cursor::MoveToRow(1))?;
     println!(
-        "Room: {}\n\n{:^15} {:^15} {:^8}",
-        Config::global().room.room_name.as_str(), "USERNAME", "Local IP", "PING"
+        "Room: {}\n\n{:<15} {:^15} {:^8}",
+        Config::global().room.room_name.as_str(),
+        "USERNAME",
+        "Local IP",
+        "PING"
     );
     let mut username = Config::global().room.username.clone();
     username.truncate(15);
-    println!(
-        "{:<15} {:^15} {:^8}",
-        username,
-        my_wg_ip,
-        "-"
-    );
+    println!("{:<15} {:^15} {:^8}", username, my_wg_ip, "0 ms");
     stdout.execute(cursor::SavePosition)?;
     while running.load(Ordering::SeqCst) {
         update_table(&mut stdout, &peers).await?;
@@ -116,7 +155,7 @@ async fn update_table(stdout: &mut Stdout, peers: &TableData) -> Result<(), anyh
         let mut username = peer.username.clone();
         username.truncate(15);
         stdout.queue(Print(format!(
-            "{:<15} {:^15} {:^8}",
+            "{:<15} {:^15} {:^8} ms",
             &username, peer.wg_ip, ping_str
         )))?;
         stdout.queue(cursor::MoveToNextLine(1))?;
