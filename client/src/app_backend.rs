@@ -16,6 +16,7 @@ use crate::server_trait::ServerTrait;
 use crate::table_data::TableData;
 use crate::toml_conf::Config;
 use crate::wg_trait::Wg;
+use crate::TableMessage;
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct JoinReq {
@@ -58,6 +59,7 @@ pub async fn start_backend(
     sender: Sender<CnrsMessage>,
     display: Arc<TableData>,
     my_wg_ip: &mut String,
+    log_sender: tokio::sync::mpsc::Sender<TableMessage>,
 ) -> Result<(), anyhow::Error> {
     let priv_key = Privkey::from_base64(Config::global().room.priv_key.as_str())?;
     let interface_name = Config::global().interface.interface_name.clone();
@@ -98,6 +100,7 @@ pub async fn start_backend(
         wg.clone(),
         server.clone(),
         sender.clone(),
+        log_sender.clone(),
         &room_name,
         username.clone(),
         public_key.to_base64(),
@@ -118,6 +121,7 @@ async fn join_room(
     wg: Arc<dyn Wg>,
     server: Arc<dyn ServerTrait>,
     sender: Sender<CnrsMessage>,
+    log_sender: tokio::sync::mpsc::Sender<TableMessage>,
     room_name: &String,
     username: String,
     pub_key: String,
@@ -211,6 +215,12 @@ async fn join_room(
                             {
                                 Ok(_) => {
                                     display.add_peer(&join_req.peer_info).await;
+                                    if let Err(e) = log_sender
+                                        .send(TableMessage::InfoLog(format!("{} joined", &join_req.peer_info.username)))
+                                        .await
+                                    {
+                                        eprintln!("Error sending log message: {}", e);
+                                    };
                                     // println!("{} joined", &join_req.peer_info.username);
                                 }
                                 Err(err) => {
@@ -225,6 +235,12 @@ async fn join_room(
                             {
                                 Ok(_) => {
                                     display.remove_peer(&disconnect_req).await;
+                                    if let Err(e) = log_sender
+                                        .send(TableMessage::InfoLog(format!("{} disconnected", &disconnect_req.username)))
+                                        .await
+                                    {
+                                        eprintln!("Error sending log message: {}", e);
+                                    };
                                     // println!("{} disconnected", &disconnect_req.username);
                                 }
                                 Err(err) => {
