@@ -1,7 +1,7 @@
 use crate::app_backend::{DisconnectReq, PeerInfo};
 use crate::toml_conf::Config;
 use crate::TableMessage;
-use crossterm::style::Print;
+use crossterm::style::{Color, Print, Stylize};
 use crossterm::QueueableCommand;
 use std::io::{stdout, Write};
 use std::sync::{
@@ -66,36 +66,46 @@ impl TableData {
         let mut lines_n = 5;
         let mut stdout = stdout();
         let peers = &(*self.data.read().await);
-        // eprintln!("3");
-        //tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-        println!(
-            "\nRoom: {}\n\n{:<15} {:^15} {:^8}",
-            Config::global().room.room_name.as_str(),
-            "USERNAME",
-            "Local IP",
-            "PING"
-        );
-        println!(
-            "{:<15} {:^15} {:^8}",
-            Config::global().room.username.as_str(),
-            self.my_wg_ip.read().await,
-            "0 ms"
-        );
+        let styled_dot = "●".with(Color::Green);
+        stdout
+            .queue(Print(format!(
+                "\nRoom: {}\n\n{:<15} {:^15} {:>7}\n",
+                Config::global().room.room_name.as_str(),
+                "  USERNAME",
+                "Local IP",
+                "PING"
+            )))?
+            .queue(Print(format!(
+                "{} {:<13} {:^15} {:>7}\n",
+                styled_dot,
+                Config::global().room.username.as_str(),
+                self.my_wg_ip.read().await,
+                "0 ms"
+            )))?;
+
         for peer in peers {
             lines_n += 1;
             let ping_millis = peer.ping.load(Ordering::SeqCst);
+            let mut dot_color = Color::Red;
             let ping_str = match ping_millis {
                 u16::MAX => "-".to_string(),
-                1000u16.. => ">999 ms".to_string(),
-                _ => format!("{:?} ms", ping_millis),
+                1000.. => ">999 ms".to_string(),
+                350.. => {
+                    dot_color = Color::Yellow;
+                    format!("{:?} ms", ping_millis)
+                }
+                _ => {
+                    dot_color = Color::Green;
+                    format!("{:?} ms", ping_millis)
+                }
             };
+            let styled_dot = "●".with(dot_color);
             let mut username = peer.username.clone();
             username.truncate(15);
             stdout.queue(Print(format!(
-                "{:<15} {:^15} {:^8}\n",
-                &username, peer.wg_ip, ping_str
+                "{} {:<13} {:^15} {:>7}\n",
+                styled_dot, &username, peer.wg_ip, ping_str
             )))?;
-
         }
 
         stdout.flush()?;
