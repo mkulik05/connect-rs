@@ -22,16 +22,18 @@ export default {
                 if (len >= MAX_PEERS_N) {
                     return new Response('Room is full', {
                         status: 403,
-                    });            
+                    });
                 }
                 let peers = await redis.lrange(room_name, 0, len - 1);
                 let res_index = -1;
+                let was_already_online = false;
                 for (let i = peers.length - 1; i >= 0; i--) {
                     if (((new Date()) - (new Date(peers[i].last_connected))) > MAX_INACTIVE_DELAY) {
                         res_index = i;
                     }
                     if (peers[i].pub_key === pub_key) {
                         res_index = i;
+                        if (peers[i].is_online) { was_already_online = true };
                         break
                     }
                 }
@@ -44,6 +46,7 @@ export default {
                 } else {
                     await redis.lset(room_name, res_index, JSON.stringify(data.peer_info));
                 }
+                data.is_reconnecting = was_already_online ? true : false;
                 await redis.publish(room_name, JSON.stringify(data))
                 return new Response(wg_ip);
             } else if (data.type === "DisconnectMsg") {
@@ -59,7 +62,7 @@ export default {
                 if (res_i !== -1) {
                     let res_data = peers[res_i];
                     res_data.is_online = false;
-                    await redis.lset(data.room_name, res_i, JSON.stringify(res_data)); 
+                    await redis.lset(data.room_name, res_i, JSON.stringify(res_data));
                 }
                 await redis.publish(data.room_name, JSON.stringify(data));
                 return new Response('OK');
@@ -76,7 +79,7 @@ export default {
                 if (res_i !== -1) {
                     let res_data = peers[res_i];
                     res_data.last_connected = new Date();
-                    await redis.lset(data.room_name, res_i, JSON.stringify(res_data)); 
+                    await redis.lset(data.room_name, res_i, JSON.stringify(res_data));
                 }
                 return new Response('OK');
             }

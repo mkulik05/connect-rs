@@ -9,6 +9,9 @@ pub trait Wg: Send + Sync {
         key_path: &str,
         my_wg_ip: &str,
     ) -> Result<(), anyhow::Error>;
+
+    // adds new peer to wg
+    // if peers with this public key existed - update it's info (not add new)
     async fn add_wg_peer(
         &self,
         interface_name: &str,

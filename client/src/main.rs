@@ -1,14 +1,17 @@
 mod app_backend;
 mod kernel_wg;
+mod logger;
 mod server;
 mod server_trait;
 mod table_data;
 mod toml_conf;
 mod wg_trait;
 
+use crate::logger::Logger;
+use crate::logger::{log, LogLevel};
 use crate::toml_conf::Config;
-use crossterm::style::Print;
 use clap::{Args, Parser, Subcommand};
+use crossterm::style::Print;
 use crossterm::terminal::{Clear, ClearType};
 use crossterm::{cursor, ExecutableCommand, QueueableCommand};
 use std::io::stdout;
@@ -48,16 +51,25 @@ struct JoinArgs {
 }
 
 #[derive(Debug)]
-pub enum TableMessage {
+pub enum UIMessage {
+    Shutdown,
     UpdateTable,
     InfoLog(String),
+    ErrorLog(String),
 }
 
 #[tokio::main]
 async fn main() -> Result<(), anyhow::Error> {
+    let (table_sender, mut table_receiver) = mpsc::channel(100);
     let cli = Cli::parse();
     match &cli.command {
         Commands::Generate(args) => {
+            Logger::init(
+                chrono::Local::now()
+                    .format("/tmp/%d_%m_%Y_%H_%M_%S.txt")
+                    .to_string(),
+                None,
+            )?;
             println!(
                 "Generating config with this information:\n\nroom name: {}\nusername: {}",
                 args.room_name, args.username
@@ -79,18 +91,24 @@ async fn main() -> Result<(), anyhow::Error> {
                 args.username.as_str(),
                 args.room_name.as_str(),
             ) {
-                eprintln!("Error during profile generation {}", err);
+                log!(LogLevel::ERROR, "Error during profile generation: {}", err);
                 anyhow::bail!("Failed to generate profile");
             };
             println!("Your config was saved to {}", conf_path);
             return Ok(());
         }
         Commands::Join(args) => {
+            Logger::init(
+                chrono::Local::now()
+                    .format("/tmp/%d_%m_%Y_%H_%M_%S.txt")
+                    .to_string(),
+                Some(table_sender.clone()),
+            )?;
             println!("Starting connection...");
             let conf_path = args.profile.clone();
             let profile = Config::from_file(conf_path.as_str());
             if let Err(err) = profile {
-                eprintln!("Error during profile loading {}", err);
+                log!(LogLevel::ERROR, "Error during blank profile loading {}", err);
                 anyhow::bail!("Failed to load profile");
             };
         }
@@ -98,21 +116,81 @@ async fn main() -> Result<(), anyhow::Error> {
 
     let mut my_wg_ip = String::new();
     let (sender, _) = broadcast::channel(16);
-    let (table_sender, mut table_receiver) = mpsc::channel(100);
+
     let mut peers = TableData::new(table_sender.clone());
     peers.calc_ping();
-
     let peers = Arc::new(peers);
-    if let Err(e) = app_backend::start_backend(
-        sender.clone(),
-        peers.clone(),
-        &mut my_wg_ip,
-        table_sender.clone(),
-    )
-    .await
-    {
-        anyhow::bail!("Error during backend start: {:?}", e);
+
+    if let Err(e) = stdout().execute(cursor::MoveDown(1)) {
+        log!(LogLevel::ERROR, "Error is table loop: {}", e);
     };
+
+    let logger_task = {
+        let peers = peers.clone();
+        tokio::spawn(async move {
+            let mut stdout = std::io::stdout();
+            let mut lines_n = 0;
+            let mut should_stop = false;
+
+            while !should_stop {
+                if let Some(msg) = table_receiver.recv().await {
+                    match msg {
+                        UIMessage::Shutdown => break,
+                        UIMessage::InfoLog(log) | UIMessage::ErrorLog(log) => {
+                            if lines_n != 0 {
+                                if let Err(e) = stdout.queue(cursor::MoveUp(lines_n as u16)) {
+                                    log!(LogLevel::ERROR, "Error is table loop: {}", e);
+                                };
+                            }
+                            if let Err(e) = stdout.queue(Clear(ClearType::FromCursorDown)) {
+                                log!(LogLevel::ERROR, "Error is table loop: {}", e);
+                            };
+                            if let Err(e) = stdout.queue(Print(format!("{}\n", log))) {
+                                log!(LogLevel::ERROR, "Error is table loop: {}", e);
+                            };
+
+                            while let Ok(msg) = table_receiver.try_recv() {
+
+                                match msg {
+                                    UIMessage::Shutdown => should_stop = true,
+                                    UIMessage::InfoLog(log) | UIMessage::ErrorLog(log) => {
+                                        if let Err(e) = stdout.queue(Print(format!("{}\n", log))) {
+                                            log!(LogLevel::ERROR, "Error is table loop: {}", e);
+                                        };
+                                    }
+                                    _ => {}
+                                }
+                            }
+
+                            lines_n = match peers.update_table().await {
+                                Ok(n) => n,
+                                Err(e) => {
+                                    log!(LogLevel::ERROR, "Error updating table: {:?}", e);
+                                    lines_n
+                                }
+                            };
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        })
+    };
+
+    if let Err(e) = app_backend::start_backend(sender.clone(), peers.clone(), &mut my_wg_ip).await {
+        log!(LogLevel::FATAL, "Error during backend start: {:?}", e);
+        if let Err(e) = table_sender.send(UIMessage::Shutdown).await {
+            log!(
+                LogLevel::ERROR,
+                "Failed to send shutdown message to table: {}",
+                e
+            );
+        };
+        if let Err(e) = logger_task.await {
+            log!(LogLevel::ERROR, "Failed waiting for table task: {}", e);
+        };
+        return Ok(());
+    }
 
     {
         *peers.my_wg_ip.write().await = my_wg_ip;
@@ -125,43 +203,18 @@ async fn main() -> Result<(), anyhow::Error> {
     })
     .expect("Error setting Ctrl-C handler");
 
-    let mut username = Config::global().room.username.clone();
-    username.truncate(15);
-
-    stdout().execute(cursor::MoveDown(1)).unwrap();
-    let logger_task = {
-        let mut stdout = std::io::stdout();
-        let peers = peers.clone();
-        tokio::spawn(async move {
-            let mut lines_n = 0;
-            loop {
-                if let Some(msg) = table_receiver.recv().await {
-                    if lines_n != 0 {
-                        stdout.queue(cursor::MoveUp(lines_n as u16)).unwrap();
-                    }
-                    stdout.queue(Clear(ClearType::FromCursorDown)).unwrap();
-                    if let TableMessage::InfoLog(log) = msg {
-                        stdout.queue(Print(format!("{}\n", log))).unwrap();
-                    }
-
-                    lines_n = match peers.update_table().await {
-                        Ok(n) => n,
-                        Err(e) => {
-                            eprintln!("Error updating table: {:?}", e);
-                            lines_n
-                        }
-                    };
-                    eprintln!("lines - {}", lines_n);
-                }
-            }
-        })
-    };
     while running.load(Ordering::SeqCst) {
-        table_sender.send(TableMessage::UpdateTable).await.unwrap();
+        if let Err(e) = table_sender.send(UIMessage::UpdateTable).await {
+            log!(
+                LogLevel::ERROR,
+                "Error while sending table update request: {}",
+                e
+            );
+        };
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
     }
     if let Err(e) = sender.send(app_backend::CnrsMessage::Shutdown) {
-        eprintln!("Failed to send shutdown message why: {}", e);
+        log!(LogLevel::ERROR, "Failed to send shutdown message: {}", e);
     };
     if let Some(handle) = &peers.calc_ping_task {
         handle.abort();
@@ -173,5 +226,6 @@ async fn main() -> Result<(), anyhow::Error> {
             break;
         }
     }
+
     Ok(())
 }
