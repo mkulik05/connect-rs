@@ -1,6 +1,7 @@
-use crate::app_backend::{DisconnectReq, PeerInfo};
+use crate::app_backend::PeerInfo;
 use crate::toml_conf::Config;
-use crate::TableMessage;
+use crate::logger::{log, LogLevel};
+use crate::UIMessage;
 use crossterm::style::{Color, Print, Stylize};
 use crossterm::QueueableCommand;
 use std::io::{stdout, Write};
@@ -24,11 +25,11 @@ pub struct TableData {
     pub data: Arc<RwLock<Vec<TableItem>>>,
     pub calc_ping_task: Option<JoinHandle<()>>,
     pub my_wg_ip: RwLock<String>,
-    pub sender: tokio::sync::mpsc::Sender<TableMessage>,
+    pub sender: tokio::sync::mpsc::Sender<UIMessage>,
 }
 
 impl TableData {
-    pub fn new(sender: tokio::sync::mpsc::Sender<TableMessage>) -> Self {
+    pub fn new(sender: tokio::sync::mpsc::Sender<UIMessage>) -> Self {
         TableData {
             data: Arc::new(RwLock::new(Vec::new())),
             calc_ping_task: None,
@@ -46,23 +47,25 @@ impl TableData {
         {
             self.data.write().await.push(displ_data);
         }
-        if let Err(e) = self.sender.send(TableMessage::UpdateTable).await {
-            eprintln!("Error sending update request: {:?}", e);
+        if let Err(e) = self.sender.send(UIMessage::UpdateTable).await {
+            log!(LogLevel::ERROR,"Error sending update request: {:?}", e);
         };
     }
-    pub async fn remove_peer(&self, info: &DisconnectReq) {
+    pub async fn remove_peer(&self, pub_key: &String) {
         {
+            let pub_key = pub_key.clone();
             self.data
                 .write()
                 .await
-                .retain(|peer| *peer.pub_key != info.pub_key);
+                .retain(|peer| *peer.pub_key != pub_key);
         }
-        if let Err(e) = self.sender.send(TableMessage::UpdateTable).await {
-            eprintln!("Error sending update request: {:?}", e);
+        if let Err(e) = self.sender.send(UIMessage::UpdateTable).await {
+            log!(LogLevel::ERROR,"Error sending update request: {:?}", e);
         };
     }
 
     pub async fn update_table(&self) -> Result<u8, anyhow::Error> {
+        log!(LogLevel::DEBUG, "update table called");
         let mut lines_n = 5;
         let mut stdout = stdout();
         let peers = &(*self.data.read().await);

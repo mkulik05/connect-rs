@@ -6,6 +6,7 @@ use futures::prelude::*;
 use redis::AsyncCommands;
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast::Sender;
+use crate::logger::{log, LogLevel};
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(tag = "type")]
@@ -54,7 +55,7 @@ impl ServerTrait for Server {
             let mut pubsub = con.into_pubsub();
 
             if let Err(e) = pubsub.subscribe(room_name.as_str()).await {
-                eprintln!("Failed to subscribe to channel: {}", e);
+                log!(LogLevel::ERROR,"Failed to subscribe to channel: {}", e);
                 return;
             }
             let mut pubsub = pubsub.into_on_message();
@@ -75,7 +76,7 @@ impl ServerTrait for Server {
                         let payload: String = match msg.get_payload() {
                             Ok(payload) => payload,
                             Err(err) => {
-                                eprintln!("Error on getting msg payload {}", err);
+                                log!(LogLevel::ERROR,"Error on getting msg payload {}", err);
                                 continue;
                             }
                         };
@@ -89,7 +90,7 @@ impl ServerTrait for Server {
                                             match sender.send(CnrsMessage::PeerDiscovered(data)) {
                                                 Ok(_) => {}
                                                 Err(e) => {
-                                                    eprintln!("Error is sending broadcast message: {}", e)
+                                                    log!(LogLevel::ERROR,"Error is sending broadcast message: {}", e)
                                                 }
                                             };
                                         }
@@ -99,7 +100,7 @@ impl ServerTrait for Server {
                                         match sender.send(CnrsMessage::PeerDisconnected(data)) {
                                             Ok(_) => {}
                                             Err(e) => {
-                                                eprintln!("Error is sending broadcast message: {}", e)
+                                                log!(LogLevel::ERROR,"Error is sending broadcast message: {}", e)
                                             }
                                         };
 
@@ -131,6 +132,7 @@ impl ServerTrait for Server {
             if peer_info.is_online && peer_info.wg_ip != *wg_ip {
                 sender.send(CnrsMessage::PeerDiscovered(JoinReq {
                     room_name: room_name.to_string(),
+                    is_reconnecting: false,
                     peer_info,
                 }))?;
             }

@@ -1,4 +1,4 @@
-pub(crate) use once_cell::sync::OnceCell;
+use once_cell::sync::OnceCell;
 use serde::{Deserialize, Serialize};
 
 const INTERFACE_PREFIX: &str = "cnrs-";
@@ -30,7 +30,7 @@ pub struct Config {
     pub addrs: Addrs,
 }
 
-pub static INSTANCE: OnceCell<Config> = OnceCell::new();
+static INSTANCE: OnceCell<Config> = OnceCell::new();
 
 impl Config {
     pub fn global() -> &'static Config {
