@@ -25,10 +25,10 @@ pub(crate) use log;
 
 #[derive(Debug)]
 pub enum LogLevel {
-    ERROR,
-    FATAL,
-    INFO,
-    DEBUG,
+    Error,
+    Fatal,
+    Info,
+    Debug,
 }
 
 impl std::fmt::Display for LogLevel {
@@ -64,11 +64,11 @@ impl Logger {
             .expect("cannot open log file");
 
         log_file
-            .write(format!("{} {:5} - {}\n", timestamp, log_level, msg).as_bytes())
+            .write_all(format!("{} {:5} - {}\n", timestamp, log_level, msg).as_bytes())
             .expect("write to log file failed");
 
         match log_level {
-            LogLevel::FATAL | LogLevel::ERROR => {
+            LogLevel::Fatal | LogLevel::Error => {
                 if let Some(sender) = &self.table_sender {
                     let _ = sender.try_send(UIMessage::ErrorLog(msg.to_string()));
                 } else {
@@ -76,7 +76,7 @@ impl Logger {
                 }
                 
             }
-            LogLevel::INFO => {
+            LogLevel::Info => {
                 if let Some(sender) = &self.table_sender {
                 let _ = sender.try_send(UIMessage::InfoLog(msg.to_string()));
                 } else {

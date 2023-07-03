@@ -55,7 +55,7 @@ impl ServerTrait for Server {
             let mut pubsub = con.into_pubsub();
 
             if let Err(e) = pubsub.subscribe(room_name.as_str()).await {
-                log!(LogLevel::ERROR,"Failed to subscribe to channel: {}", e);
+                log!(LogLevel::Error,"Failed to subscribe to channel: {}", e);
                 return;
             }
             let mut pubsub = pubsub.into_on_message();
@@ -76,7 +76,7 @@ impl ServerTrait for Server {
                         let payload: String = match msg.get_payload() {
                             Ok(payload) => payload,
                             Err(err) => {
-                                log!(LogLevel::ERROR,"Error on getting msg payload {}", err);
+                                log!(LogLevel::Error,"Error on getting msg payload {}", err);
                                 continue;
                             }
                         };
@@ -90,7 +90,7 @@ impl ServerTrait for Server {
                                             match sender.send(CnrsMessage::PeerDiscovered(data)) {
                                                 Ok(_) => {}
                                                 Err(e) => {
-                                                    log!(LogLevel::ERROR,"Error is sending broadcast message: {}", e)
+                                                    log!(LogLevel::Error,"Error is sending broadcast message: {}", e)
                                                 }
                                             };
                                         }
@@ -100,7 +100,7 @@ impl ServerTrait for Server {
                                         match sender.send(CnrsMessage::PeerDisconnected(data)) {
                                             Ok(_) => {}
                                             Err(e) => {
-                                                log!(LogLevel::ERROR,"Error is sending broadcast message: {}", e)
+                                                log!(LogLevel::Error,"Error is sending broadcast message: {}", e)
                                             }
                                         };
 

@@ -48,24 +48,24 @@ impl TableData {
             self.data.write().await.push(displ_data);
         }
         if let Err(e) = self.sender.send(UIMessage::UpdateTable).await {
-            log!(LogLevel::ERROR,"Error sending update request: {:?}", e);
+            log!(LogLevel::Error,"Error sending update request: {:?}", e);
         };
     }
-    pub async fn remove_peer(&self, pub_key: &String) {
+    pub async fn remove_peer(&self, pub_key: &str) {
         {
-            let pub_key = pub_key.clone();
+            let pub_key = pub_key.to_owned();
             self.data
                 .write()
                 .await
                 .retain(|peer| *peer.pub_key != pub_key);
         }
         if let Err(e) = self.sender.send(UIMessage::UpdateTable).await {
-            log!(LogLevel::ERROR,"Error sending update request: {:?}", e);
+            log!(LogLevel::Error,"Error sending update request: {:?}", e);
         };
     }
 
     pub async fn update_table(&self) -> Result<u8, anyhow::Error> {
-        log!(LogLevel::DEBUG, "update table called");
+        log!(LogLevel::Debug, "update table called");
         let mut lines_n = 5;
         let mut stdout = stdout();
         let peers = &(*self.data.read().await);
@@ -131,7 +131,7 @@ impl TableData {
             }
         }));
     }
-    async fn get_ping(ip: &String) -> Result<u16, anyhow::Error> {
+    async fn get_ping(ip: &str) -> Result<u16, anyhow::Error> {
         let payload = [0; 8];
         match surge_ping::ping(ip.parse()?, &payload).await {
             Ok((_packet, duration)) => {

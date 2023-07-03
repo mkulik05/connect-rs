@@ -91,7 +91,7 @@ async fn main() -> Result<(), anyhow::Error> {
                 args.username.as_str(),
                 args.room_name.as_str(),
             ) {
-                log!(LogLevel::ERROR, "Error during profile generation: {}", err);
+                log!(LogLevel::Error, "Error during profile generation: {}", err);
                 anyhow::bail!("Failed to generate profile");
             };
             println!("Your config was saved to {}", conf_path);
@@ -108,7 +108,7 @@ async fn main() -> Result<(), anyhow::Error> {
             let conf_path = args.profile.clone();
             let profile = Config::from_file(conf_path.as_str());
             if let Err(err) = profile {
-                log!(LogLevel::ERROR, "Error during blank profile loading {}", err);
+                log!(LogLevel::Error, "Error during blank profile loading {}", err);
                 anyhow::bail!("Failed to load profile");
             };
         }
@@ -122,7 +122,7 @@ async fn main() -> Result<(), anyhow::Error> {
     let peers = Arc::new(peers);
 
     if let Err(e) = stdout().execute(cursor::MoveDown(1)) {
-        log!(LogLevel::ERROR, "Error is table loop: {}", e);
+        log!(LogLevel::Error, "Error is table loop: {}", e);
     };
 
     let logger_task = {
@@ -139,14 +139,14 @@ async fn main() -> Result<(), anyhow::Error> {
                         UIMessage::InfoLog(log) | UIMessage::ErrorLog(log) => {
                             if lines_n != 0 {
                                 if let Err(e) = stdout.queue(cursor::MoveUp(lines_n as u16)) {
-                                    log!(LogLevel::ERROR, "Error is table loop: {}", e);
+                                    log!(LogLevel::Error, "Error is table loop: {}", e);
                                 };
                             }
                             if let Err(e) = stdout.queue(Clear(ClearType::FromCursorDown)) {
-                                log!(LogLevel::ERROR, "Error is table loop: {}", e);
+                                log!(LogLevel::Error, "Error is table loop: {}", e);
                             };
                             if let Err(e) = stdout.queue(Print(format!("{}\n", log))) {
-                                log!(LogLevel::ERROR, "Error is table loop: {}", e);
+                                log!(LogLevel::Error, "Error is table loop: {}", e);
                             };
 
                             while let Ok(msg) = table_receiver.try_recv() {
@@ -155,7 +155,7 @@ async fn main() -> Result<(), anyhow::Error> {
                                     UIMessage::Shutdown => should_stop = true,
                                     UIMessage::InfoLog(log) | UIMessage::ErrorLog(log) => {
                                         if let Err(e) = stdout.queue(Print(format!("{}\n", log))) {
-                                            log!(LogLevel::ERROR, "Error is table loop: {}", e);
+                                            log!(LogLevel::Error, "Error is table loop: {}", e);
                                         };
                                     }
                                     _ => {}
@@ -165,7 +165,7 @@ async fn main() -> Result<(), anyhow::Error> {
                             lines_n = match peers.update_table().await {
                                 Ok(n) => n,
                                 Err(e) => {
-                                    log!(LogLevel::ERROR, "Error updating table: {:?}", e);
+                                    log!(LogLevel::Error, "Error updating table: {:?}", e);
                                     lines_n
                                 }
                             };
@@ -178,16 +178,16 @@ async fn main() -> Result<(), anyhow::Error> {
     };
 
     if let Err(e) = app_backend::start_backend(sender.clone(), peers.clone(), &mut my_wg_ip).await {
-        log!(LogLevel::FATAL, "Error during backend start: {:?}", e);
+        log!(LogLevel::Fatal, "Error during backend start: {:?}", e);
         if let Err(e) = table_sender.send(UIMessage::Shutdown).await {
             log!(
-                LogLevel::ERROR,
+                LogLevel::Error,
                 "Failed to send shutdown message to table: {}",
                 e
             );
         };
         if let Err(e) = logger_task.await {
-            log!(LogLevel::ERROR, "Failed waiting for table task: {}", e);
+            log!(LogLevel::Error, "Failed waiting for table task: {}", e);
         };
         return Ok(());
     }
@@ -206,7 +206,7 @@ async fn main() -> Result<(), anyhow::Error> {
     while running.load(Ordering::SeqCst) {
         if let Err(e) = table_sender.send(UIMessage::UpdateTable).await {
             log!(
-                LogLevel::ERROR,
+                LogLevel::Error,
                 "Error while sending table update request: {}",
                 e
             );
@@ -214,7 +214,7 @@ async fn main() -> Result<(), anyhow::Error> {
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
     }
     if let Err(e) = sender.send(app_backend::CnrsMessage::Shutdown) {
-        log!(LogLevel::ERROR, "Failed to send shutdown message: {}", e);
+        log!(LogLevel::Error, "Failed to send shutdown message: {}", e);
     };
     if let Some(handle) = &peers.calc_ping_task {
         handle.abort();
