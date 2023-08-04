@@ -17,6 +17,7 @@ pub trait ServerTrait: Send + Sync {
         room_name: &String,
         wg_ip: &String,
     ) -> Result<(), anyhow::Error>;
-    async fn send_disconnect_signal(&self, data: DisconnectReq) -> Result<(), anyhow::Error>;
+    async fn send_disconnect_signal(data: DisconnectReq) -> Result<(), anyhow::Error> where Self: Sized;
     async fn update_connection_time(&self, data: UpdateTimerReq) -> Result<(), anyhow::Error>;
+    fn run(sender: tokio::sync::broadcast::Sender<CnrsMessage>, pub_key: String) where Self: Sized;
 }

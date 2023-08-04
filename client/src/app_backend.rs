@@ -1,11 +1,9 @@
 use anyhow::Context;
-use chrono::prelude::*;
-use nix::unistd::Uid;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
-use std::net::TcpListener;
+use std::net::{SocketAddr, TcpListener, ToSocketAddrs};
 use std::sync::Arc;
-use stun_client::*;
+use stunclient::StunClient;
 use tokio::fs::write;
 use tokio::sync::broadcast::Sender;
 use wireguard_keys::{self, Privkey};
@@ -14,7 +12,6 @@ use crate::kernel_wg::KernelWg;
 use crate::logger::{log, LogLevel};
 use crate::server::Server;
 use crate::server_trait::ServerTrait;
-use crate::table_data::TableData;
 use crate::toml_conf::Config;
 use crate::wg_trait::Wg;
 
@@ -50,82 +47,102 @@ pub struct PeerInfo {
 
 #[derive(Clone, Debug)]
 pub enum CnrsMessage {
+    // Aditionally is used to connect to each peer after joining room
+    // Can be received from server
     PeerDiscovered(JoinReq),
+
+    // Peer was connected to pc (from wg side)
+    PeerConnected(JoinReq),
+
+    // Can be received from server
     PeerDisconnected(DisconnectReq),
+
+    // Stop handling messages
     Shutdown,
+
+    // Used to confirm that cleaned up before shutdown (sended disconnect signal)
     FinishedDisconnecting,
 }
 
 pub async fn start_backend(
     sender: Sender<CnrsMessage>,
-    display: Arc<TableData>,
     my_wg_ip: &mut String,
 ) -> Result<(), anyhow::Error> {
     let priv_key = Privkey::from_base64(Config::global().room.priv_key.as_str())?;
     let interface_name = Config::global().interface.interface_name.clone();
-    let room_name = Config::global().room.room_name.clone();
-    let username = Config::global().room.username.clone();
-
-    if !Uid::effective().is_root() {
-        println!("You should run this app with root permissions");
-        return Ok(());
-    }
 
     let port = get_unused_port();
     log!(LogLevel::Debug, "Working with port {}", port);
 
-    let public_key = priv_key.pubkey();
-    let key_name = Local::now()
-        .format("/tmp/connect-wg-%Y_%m_%d_%H_%M_%S.key")
-        .to_string();
+    let public_key = priv_key.pubkey().to_base64();
+    let conf_path = format!("{}.conf", interface_name.as_str());
 
-    match write(&key_name, priv_key.to_base64().as_bytes()).await {
-        Ok(_) => {}
-        Err(e) => log!(LogLevel::Error,"Error saving key: {}", e),
+    // For linux just putting key into config
+    // Additional configuration is done using linux abilities
+    #[cfg(target_os = "linux")]
+    if let Err(e) = write(&conf_path, priv_key.to_base64().as_bytes()).await {
+        log!(LogLevel::Error, "Error saving key: {}", e);
     };
-
-    log!(LogLevel::Debug, "Public key: {}", &public_key.to_base64());
-
+    log!(LogLevel::Debug, "Public key: {}", &public_key);
 
     let wg: Arc<dyn Wg> = Arc::new(KernelWg {});
     let server: Arc<dyn ServerTrait> = Arc::new(Server {});
 
-    let wg_ip_res = join_room(
-        display,
-        wg.clone(),
+    Server::run(sender.clone(), public_key.clone());
+
+    // Getting our wireguard ip
+    let wg_ip = send_join_req(
         server.clone(),
-        sender.clone(),
-        &room_name,
-        username.clone(),
-        public_key.to_base64(),
+        &public_key,
         port,
-        key_name,
-        &interface_name,
     )
-    .await;
-    match wg_ip_res {
-        Ok(ip) => *my_wg_ip = ip,
-        Err(e) => anyhow::bail!("Joining room failed: {}", e),
+    .await?;
+    *my_wg_ip = wg_ip.clone();
+
+    // For windows creating whole wireguard interface config
+    #[cfg(target_os = "windows")]
+    if let Err(e) = write(
+        &conf_path,
+        format!(
+            "[Interface]\nPrivateKey = {}\nListenPort = {}\nAddress = {}/24",
+            priv_key.to_base64(),
+            port,
+            wg_ip.clone()
+        )
+        .as_bytes(),
+    )
+    .await
+    {
+        log!(LogLevel::Error, "Error saving wg config: {}", e);
+    };
+
+    if let Err(e) = join_room(
+        ConnectConfig {
+            wg: wg.clone(),
+            server: server.clone(),
+            cnrs_sender: sender.clone(),
+        },
+        public_key,
+        port,
+        conf_path,
+        wg_ip,
+    )
+    .await
+    {
+        anyhow::bail!("Joining room failed: {}", e);
     };
     Ok(())
 }
 
-async fn join_room(
-    display: Arc<TableData>,
-    wg: Arc<dyn Wg>,
+async fn send_join_req(
     server: Arc<dyn ServerTrait>,
-    sender: Sender<CnrsMessage>,
-    room_name: &String,
-    username: String,
-    pub_key: String,
+    pub_key: &String,
     port: u16,
-    key_name: String,
-    interface_name: &String,
 ) -> Result<String, anyhow::Error> {
     let mapped_addr = loop {
         match get_mapped_addr("0.0.0.0", port).await {
             Ok(addr) => break addr,
-            Err(e) => log!(LogLevel::Error,"{}", e),
+            Err(e) => log!(LogLevel::Error, "{}", e),
         }
     };
     log!(LogLevel::Debug, "Mapped address: {}", mapped_addr);
@@ -133,143 +150,88 @@ async fn join_room(
     let data = PeerInfo {
         wg_ip: "".to_string(),
         last_connected: "".to_string(),
-        pub_key: pub_key.clone(),
+        pub_key: pub_key.to_owned(),
         is_online: true,
-        username: username.clone(),
+        username: Config::global().room.username.to_owned(),
         mapped_addr,
     };
     let data = JoinReq {
-        room_name: room_name.clone(),
+        room_name: Config::global().room.room_name.clone().to_owned(),
         peer_info: data,
         is_reconnecting: false,
     };
     let wg_ip = server.send_peer_info(data).await?;
     log!(LogLevel::Debug, "Connect info sent");
+    Ok(wg_ip)
+}
 
+struct ConnectConfig {
+    wg: Arc<dyn Wg>,
+    server: Arc<dyn ServerTrait>,
+    cnrs_sender: Sender<CnrsMessage>,
+}
+
+async fn join_room(
+    connect_conf: ConnectConfig,
+    pub_key: String,
+    port: u16,
+    key_name: String,
+    wg_ip: String,
+) -> Result<(), anyhow::Error> {
     {
-        let pub_key = pub_key.clone();
-        let server = server.clone();
-        let room_name = room_name.clone();
+        let server = connect_conf.server.clone();
+        let room_name = Config::global().room.room_name.clone();
         let msg = UpdateTimerReq { room_name, pub_key };
         tokio::spawn(async move {
             loop {
                 if let Err(e) = server.update_connection_time(msg.clone()).await {
-                    log!(LogLevel::Error,"Error updating last connection time: {}", e);
+                    log!(
+                        LogLevel::Error,
+                        "Error updating last connection time: {}",
+                        e
+                    );
                 };
-                log!(LogLevel::Debug, "Sended request to update last connection time");
+                log!(
+                    LogLevel::Debug,
+                    "Sended request to update last connection time"
+                );
                 tokio::time::sleep(std::time::Duration::from_secs(3600 * 6)).await;
             }
         });
-    }  
+    }
 
-    
-    wg.init_wg(interface_name, port, key_name.as_str(), wg_ip.as_str())
+    connect_conf
+        .wg
+        .init_wg(port, key_name.as_str(), wg_ip.as_str(), connect_conf.cnrs_sender.clone())
         .await
         .with_context(|| "failed to init wg")?;
 
     log!(LogLevel::Debug, "Inited wg");
 
-    let mut rx2 = sender.subscribe();
-    let wg = wg.clone();
-    let interface_name = interface_name.clone();
-    let pub_key = pub_key.clone();
-    {
-        let sender = sender.clone();
-        let server = server.clone();
-        let room_name = room_name.clone();
+    // let mut rx2 = connect_conf.cnrs_sender.subscribe();
+    // let wg = connect_conf.wg.clone();
+    // let interface_name = connect_conf.interface_name.clone();
+    // let pub_key = connect_conf.pub_key.clone();
+    // {
+    //     let sender = connect_conf.cnrs_sender.clone();
+    //     let server = connect_conf.server.clone();
+    //     let room_name = room_name.clone();
 
-        tokio::spawn(async move {
-            loop {
-                if let Ok(data) = rx2.recv().await {
-                    match data {
-                        CnrsMessage::Shutdown => {
-                            if let Err(e) = wg.clean_wg_up(interface_name.as_str()).await {
-                                log!(LogLevel::Error,"Error on exit: {}", e);
-                            }
-                            if let Err(e) = server
-                                .send_disconnect_signal(DisconnectReq {
-                                    room_name: room_name.to_string(),
-                                    pub_key,
-                                    username,
-                                })
-                                .await
-                            {
-                                log!(LogLevel::Error,"Failed to send disconnect message: {}", e);
-                            }
-                            if let Err(e) = sender.send(CnrsMessage::FinishedDisconnecting) {
-                                log!(LogLevel::Error,"Failed to semd stopped signal: {}", e);
-                            };
-                            break;
-                        }
-                        CnrsMessage::PeerDiscovered(join_req) => {
-                            match wg
-                                .add_wg_peer(
-                                    &interface_name,
-                                    &join_req.peer_info.pub_key,
-                                    &join_req.peer_info.mapped_addr,
-                                    &join_req.peer_info.wg_ip,
-                                )
-                                .await
-                            {
-                                Ok(_) => {
-                                    if join_req.is_reconnecting {
-                                        display.remove_peer(&join_req.peer_info.pub_key).await;
-                                    }
-                                    display.add_peer(&join_req.peer_info).await;
+        
+    // }
 
-                                    let msg = if join_req.is_reconnecting {
-                                        "reconnected"
-                                    } else {
-                                        "joined"
-                                    };
-                                    log!(
-                                        LogLevel::Info,
-                                        "{} {}",
-                                        &join_req.peer_info.username,
-                                        msg
-                                    );
-                                }
-                                Err(err) => {
-                                    log!(LogLevel::Error,"Error during initialising new connection: {:?}", err)
-                                }
-                            };
-                        }
-                        CnrsMessage::PeerDisconnected(disconnect_req) => {
-                            match wg
-                                .remove_wg_peer(&interface_name, &disconnect_req.pub_key)
-                                .await
-                            {
-                                Ok(_) => {
-                                    display.remove_peer(&disconnect_req.pub_key).await;
-
-                                    log!(
-                                        LogLevel::Info,
-                                        "{} disconnected",
-                                        &disconnect_req.username
-                                    );
-                                }
-                                Err(err) => {
-                                    log!(LogLevel::Error,"Error during removing wg peer: {:?}", err)
-                                }
-                            };
-                        }
-                        _ => {}
-                    }
-                }
-            }
-        });
-    }
-
-    server
-        .connect_to_each(sender.clone(), room_name, &wg_ip)
+    let room_name = Config::global().room.room_name.clone();
+    connect_conf
+        .server
+        .connect_to_each(connect_conf.cnrs_sender.clone(), &room_name, &wg_ip)
         .await
         .with_context(|| "Error during connection to other peers")?;
 
-    server
-        .sub_to_changes(sender.clone(), &wg_ip, room_name)
+    connect_conf
+        .server
+        .sub_to_changes(connect_conf.cnrs_sender.clone(), &wg_ip, &room_name)
         .await?;
-
-    Ok(wg_ip)
+    Ok(())
 }
 
 fn get_unused_port() -> u16 {
@@ -288,18 +250,18 @@ pub fn read_str_from_cli(msg: String) -> String {
 }
 
 async fn get_mapped_addr(addr: &str, port: u16) -> Result<String, anyhow::Error> {
-    let mut client = Client::new(format!("{}:{}", addr, port), None).await?;
-    let res = client
-        .binding_request(&Config::global().addrs.stun_addr, None)
-        .await?;
-    let class = res.get_class();
-    if class != Class::SuccessResponse {
-        anyhow::bail!("Invalid response class: {:?}", class)
-    }
+    let local_addr: SocketAddr = format!("{}:{}", addr, port).parse()?;
+    let stun_addr = Config::global()
+        .addrs
+        .stun_addr
+        .to_socket_addrs()?
+        .filter(|x| x.is_ipv4())
+        .next()
+        .unwrap();
+    let udp = tokio::net::UdpSocket::bind(&local_addr).await?;
 
-    if let Some(addr) = Attribute::get_xor_mapped_address(&res) {
-        Ok(addr.to_string())
-    } else {
-        anyhow::bail!("Didn't got mapped address from stun client")
-    }
+    let c = StunClient::new(stun_addr);
+    let f = c.query_external_address_async(&udp);
+    let my_external_addr = f.await?;
+    Ok(my_external_addr.to_string())
 }

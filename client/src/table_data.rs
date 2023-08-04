@@ -1,6 +1,6 @@
 use crate::app_backend::PeerInfo;
-use crate::toml_conf::Config;
 use crate::logger::{log, LogLevel};
+use crate::toml_conf::Config;
 use crate::UIMessage;
 use crossterm::style::{Color, Print, Stylize};
 use crossterm::QueueableCommand;
@@ -40,7 +40,7 @@ impl TableData {
     pub async fn add_peer(&self, info: &PeerInfo) {
         let displ_data = TableItem {
             username: info.username.clone(),
-            wg_ip: info.wg_ip.clone(),
+            wg_ip: info.wg_ip.clone(), 
             ping: AtomicU16::new(u16::MAX),
             pub_key: info.pub_key.clone(),
         };
@@ -48,7 +48,7 @@ impl TableData {
             self.data.write().await.push(displ_data);
         }
         if let Err(e) = self.sender.send(UIMessage::UpdateTable).await {
-            log!(LogLevel::Error,"Error sending update request: {:?}", e);
+            log!(LogLevel::Error, "Error sending update request: {:?}", e);
         };
     }
     pub async fn remove_peer(&self, pub_key: &str) {
@@ -60,12 +60,11 @@ impl TableData {
                 .retain(|peer| *peer.pub_key != pub_key);
         }
         if let Err(e) = self.sender.send(UIMessage::UpdateTable).await {
-            log!(LogLevel::Error,"Error sending update request: {:?}", e);
+            log!(LogLevel::Error, "Error sending update request: {:?}", e);
         };
     }
 
     pub async fn update_table(&self) -> Result<u8, anyhow::Error> {
-        log!(LogLevel::Debug, "update table called");
         let mut lines_n = 5;
         let mut stdout = stdout();
         let peers = &(*self.data.read().await);

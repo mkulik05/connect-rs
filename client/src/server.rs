@@ -20,6 +20,33 @@ pub struct Server {}
 
 #[async_trait]
 impl ServerTrait for Server {
+    fn run(sender: tokio::sync::broadcast::Sender<CnrsMessage>, pub_key: String) {
+        tokio::spawn(async move {
+            loop {
+                if let Ok(data) = sender.subscribe().recv().await {
+                    log!(LogLevel::Debug, "[server] got broadcast msg {:?}", data);
+                    match data {
+                        CnrsMessage::Shutdown => {
+                            if let Err(e) = Server::send_disconnect_signal(DisconnectReq {
+                                    room_name: Config::global().room.room_name.clone(),
+                                    username: Config::global().room.username.clone(),
+                                    pub_key,
+                                })
+                                .await
+                            {
+                                log!(LogLevel::Error,"Failed to send disconnect message: {}", e);
+                            }
+                            if let Err(e) = sender.send(CnrsMessage::FinishedDisconnecting) {
+                                log!(LogLevel::Error,"Failed to semd stopped signal: {}", e);
+                            };
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        });
+    }
     async fn send_peer_info(&self, data: JoinReq) -> Result<String, anyhow::Error> {
         let data: String = serde_json::to_string(&InfoMsg::JoinMsg(data))?;
         let client = reqwest::Client::new();
@@ -139,7 +166,7 @@ impl ServerTrait for Server {
         }
         Ok(())
     }
-    async fn send_disconnect_signal(&self, data: DisconnectReq) -> Result<(), anyhow::Error> {
+    async fn send_disconnect_signal(data: DisconnectReq) -> Result<(), anyhow::Error> {
         let data = serde_json::to_string(&InfoMsg::DisconnectMsg(data))?;
         let client = reqwest::Client::new();
         let res = client

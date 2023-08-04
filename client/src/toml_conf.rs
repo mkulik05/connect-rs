@@ -38,13 +38,11 @@ impl Config {
     }
 
     pub fn generate(
-        pattern_path: &str,
         dest_path: &str,
         username: &str,
         room_name: &str,
     ) -> Result<(), anyhow::Error> {
-        let pattern_config = std::fs::read_to_string(pattern_path)?;
-        let mut conf: Config = toml::from_str(pattern_config.as_str())?;
+        let mut conf: Config = toml::from_str(include_str!("../profile.toml"))?;
         let private_key = wireguard_keys::Privkey::generate();
         conf.room.room_name = room_name.to_string();
         conf.room.username = username.to_string();

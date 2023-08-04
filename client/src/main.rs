@@ -10,17 +10,17 @@ mod wg_trait;
 use crate::logger::Logger;
 use crate::logger::{log, LogLevel};
 use crate::toml_conf::Config;
+use crate::app_backend::CnrsMessage;
 use clap::{Args, Parser, Subcommand};
 use crossterm::style::Print;
 use crossterm::terminal::{Clear, ClearType};
 use crossterm::{cursor, ExecutableCommand, QueueableCommand};
+use is_root::is_root;
 use std::io::stdout;
 use std::sync::atomic::Ordering;
 use std::sync::{atomic::AtomicBool, Arc};
 use table_data::TableData;
 use tokio::sync::{broadcast, mpsc};
-
-const PROFILE_PATH: &str = "profile.toml";
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -35,7 +35,7 @@ enum Commands {
     /// Generate new connection profile
     Generate(GenerateArgs),
 
-    /// Join room with information from profile
+    /// Join room with information from specified profile
     Join(JoinArgs),
 }
 
@@ -50,23 +50,31 @@ struct JoinArgs {
     profile: String,
 }
 
+// Messages to table
 #[derive(Debug)]
 pub enum UIMessage {
+    // Full stop, mostly for table updating
     Shutdown,
+
+    // Refresh data in table
     UpdateTable,
+
+    // Display info/error message to user
     InfoLog(String),
     ErrorLog(String),
 }
 
 #[tokio::main]
 async fn main() -> Result<(), anyhow::Error> {
+    // Way to comminicate with table (update it, send messages to display)
     let (table_sender, mut table_receiver) = mpsc::channel(100);
+
     let cli = Cli::parse();
     match &cli.command {
         Commands::Generate(args) => {
             Logger::init(
                 chrono::Local::now()
-                    .format("/tmp/%d_%m_%Y_%H_%M_%S.txt")
+                    .format("%d_%m_%Y_%H_%M_%S.log")
                     .to_string(),
                 None,
             )?;
@@ -86,7 +94,6 @@ async fn main() -> Result<(), anyhow::Error> {
                 }
             }
             if let Err(err) = Config::generate(
-                PROFILE_PATH,
                 conf_path.as_str(),
                 args.username.as_str(),
                 args.room_name.as_str(),
@@ -100,84 +107,165 @@ async fn main() -> Result<(), anyhow::Error> {
         Commands::Join(args) => {
             Logger::init(
                 chrono::Local::now()
-                    .format("/tmp/%d_%m_%Y_%H_%M_%S.txt")
+                    .format("%d_%m_%Y_%H_%M_%S.log")
                     .to_string(),
                 Some(table_sender.clone()),
             )?;
             println!("Starting connection...");
+
             let conf_path = args.profile.clone();
-            let profile = Config::from_file(conf_path.as_str());
-            if let Err(err) = profile {
-                log!(LogLevel::Error, "Error during blank profile loading {}", err);
+
+            // Loading profile (it will set up global variables with corresponded values)
+            if let Err(err) = Config::from_file(conf_path.as_str()) {
+                log!(
+                    LogLevel::Error,
+                    "Error during blank profile loading {}",
+                    err
+                );
                 anyhow::bail!("Failed to load profile");
             };
         }
+    }
+
+    // To work with interfaces and wireguard root is required
+    if !is_root() {
+        log!(LogLevel::Info, "Admin/root privileges are required");
+        println!("You should run this app with admin/root privileges");
+        return Ok(());
     }
 
     let mut my_wg_ip = String::new();
     let (sender, _) = broadcast::channel(16);
 
     let mut peers = TableData::new(table_sender.clone());
+
+    // Starting pinging each peer
     peers.calc_ping();
+
     let peers = Arc::new(peers);
 
     if let Err(e) = stdout().execute(cursor::MoveDown(1)) {
         log!(LogLevel::Error, "Error is table loop: {}", e);
     };
 
-    let logger_task = {
+    let table_task = {
+        let sender = sender.clone();
+        // Tast to update table, display incoming info and errors to user
+
         let peers = peers.clone();
         tokio::spawn(async move {
             let mut stdout = std::io::stdout();
             let mut lines_n = 0;
-            let mut should_stop = false;
 
-            while !should_stop {
-                if let Some(msg) = table_receiver.recv().await {
-                    match msg {
-                        UIMessage::Shutdown => break,
-                        UIMessage::InfoLog(log) | UIMessage::ErrorLog(log) => {
-                            if lines_n != 0 {
-                                if let Err(e) = stdout.queue(cursor::MoveUp(lines_n as u16)) {
-                                    log!(LogLevel::Error, "Error is table loop: {}", e);
-                                };
-                            }
-                            if let Err(e) = stdout.queue(Clear(ClearType::FromCursorDown)) {
-                                log!(LogLevel::Error, "Error is table loop: {}", e);
-                            };
-                            if let Err(e) = stdout.queue(Print(format!("{}\n", log))) {
-                                log!(LogLevel::Error, "Error is table loop: {}", e);
-                            };
-
-                            while let Ok(msg) = table_receiver.try_recv() {
-
-                                match msg {
-                                    UIMessage::Shutdown => should_stop = true,
-                                    UIMessage::InfoLog(log) | UIMessage::ErrorLog(log) => {
-                                        if let Err(e) = stdout.queue(Print(format!("{}\n", log))) {
+            let mut cnrs_receiver = sender.subscribe();
+            'outer_loop: loop {
+                // Waiting for incoming message, and then trying to read remaining quequed messages
+                tokio::select! {
+                    msg = table_receiver.recv() => {
+                        log!(LogLevel::Debug, "[table] got msg {:?}", msg);
+                        if let Some(msg) = msg {
+                            match msg {
+                                UIMessage::Shutdown => break,
+                                UIMessage::InfoLog(log) | UIMessage::ErrorLog(log) => {
+                                    if lines_n != 0 {
+                                        if let Err(e) = stdout.queue(cursor::MoveUp(lines_n as u16)) {
                                             log!(LogLevel::Error, "Error is table loop: {}", e);
                                         };
                                     }
-                                    _ => {}
+                                    if let Err(e) = stdout.queue(Clear(ClearType::FromCursorDown)) {
+                                        log!(LogLevel::Error, "Error is table loop: {}", e);
+                                    };
+                                    if let Err(e) = stdout.queue(Print(format!("{}\n", log))) {
+                                        log!(LogLevel::Error, "Error is table loop: {}", e);
+                                    };
+
+                                    while let Ok(msg) = table_receiver.try_recv() {
+
+                                        match msg {
+                                            UIMessage::Shutdown => break 'outer_loop,
+                                            UIMessage::InfoLog(log) | UIMessage::ErrorLog(log) => {
+                                                if let Err(e) = stdout.queue(Print(format!("{}\n", log))) {
+                                                    log!(LogLevel::Error, "Error is table loop: {}", e);
+                                                };
+                                            }
+                                            _ => {}
+                                        }
+                                    }
+
+                                    lines_n = match peers.update_table().await {
+                                        Ok(n) => n,
+                                        Err(e) => {
+                                            log!(LogLevel::Error, "Error updating table: {:?}", e);
+                                            lines_n
+                                        }
+                                    };
+                                }
+                                UIMessage::UpdateTable => {
+                                    if lines_n != 0 {
+                                        if let Err(e) = stdout.queue(cursor::MoveUp(lines_n as u16)) {
+                                            log!(LogLevel::Error, "Error is table loop: {}", e);
+                                        };
+                                    }
+                                    if let Err(e) = stdout.queue(Clear(ClearType::FromCursorDown)) {
+                                        log!(LogLevel::Error, "Error is table loop: {}", e);
+                                    };
+                                    lines_n = match peers.update_table().await {
+                                        Ok(n) => n,
+                                        Err(e) => {
+                                            log!(LogLevel::Error, "Error updating table: {:?}", e);
+                                            lines_n
+                                        }
+                                    };
                                 }
                             }
-
-                            lines_n = match peers.update_table().await {
-                                Ok(n) => n,
-                                Err(e) => {
-                                    log!(LogLevel::Error, "Error updating table: {:?}", e);
-                                    lines_n
-                                }
-                            };
                         }
-                        _ => {}
+                    },
+                    msg = cnrs_receiver.recv() => {
+                        log!(LogLevel::Debug, "[table cnrs] got msg {:?}", msg);
+                        if let Ok(msg) = msg {
+                            match msg {
+                                CnrsMessage::Shutdown => {
+                                    break 'outer_loop;
+                                }
+                                CnrsMessage::PeerConnected(join_req) => {
+                                    if join_req.is_reconnecting {
+                                        peers.remove_peer(&join_req.peer_info.pub_key).await;
+                                    }
+                                    peers.add_peer(&join_req.peer_info).await;
+
+                                    let msg = if join_req.is_reconnecting {
+                                        "reconnected"
+                                    } else {
+                                        "joined"
+                                    };
+                                    log!(
+                                        LogLevel::Info,
+                                        "{} {}",
+                                        &join_req.peer_info.username,
+                                        msg
+                                    );
+                                }
+                                CnrsMessage::PeerDisconnected(disconnect_req) => {
+                                    peers.remove_peer(&disconnect_req.pub_key).await;
+        
+                                    log!(
+                                        LogLevel::Info,
+                                        "{} disconnected",
+                                        &disconnect_req.username
+                                    );
+                                }
+                                _ => {}
+                            }
+                        }
                     }
                 }
             }
         })
     };
 
-    if let Err(e) = app_backend::start_backend(sender.clone(), peers.clone(), &mut my_wg_ip).await {
+    // Creating interfaces, joining room and so on.
+    // Some tasks are spawned in it
+    if let Err(e) = app_backend::start_backend(sender.clone(), &mut my_wg_ip).await {
         log!(LogLevel::Fatal, "Error during backend start: {:?}", e);
         if let Err(e) = table_sender.send(UIMessage::Shutdown).await {
             log!(
@@ -186,23 +274,26 @@ async fn main() -> Result<(), anyhow::Error> {
                 e
             );
         };
-        if let Err(e) = logger_task.await {
+        if let Err(e) = table_task.await {
             log!(LogLevel::Error, "Failed waiting for table task: {}", e);
         };
         return Ok(());
     }
 
+    log!(LogLevel::Debug, "Backend started");
     {
         *peers.my_wg_ip.write().await = my_wg_ip;
     }
+
     let running = Arc::new(AtomicBool::new(true));
     let r = running.clone();
-
     ctrlc::set_handler(move || {
         r.store(false, Ordering::SeqCst);
+        log!(LogLevel::Debug, "ctrc pressed");
     })
     .expect("Error setting Ctrl-C handler");
 
+    // Updating table (espesially ping)
     while running.load(Ordering::SeqCst) {
         if let Err(e) = table_sender.send(UIMessage::UpdateTable).await {
             log!(
@@ -220,9 +311,10 @@ async fn main() -> Result<(), anyhow::Error> {
         handle.abort();
     }
 
+    // Waiting for verification that process ended correctly
     while let Ok(msg) = sender.subscribe().recv().await {
         if let app_backend::CnrsMessage::FinishedDisconnecting = msg {
-            logger_task.abort();
+            table_task.abort();
             break;
         }
     }

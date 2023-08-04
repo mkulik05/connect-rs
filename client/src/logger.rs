@@ -4,20 +4,20 @@ use std::io::Write;
 
 use once_cell::sync::OnceCell;
 use tokio::sync::mpsc::Sender;
-// use chrono::Local;
 
 static INSTANCE: OnceCell<Logger> = OnceCell::new();
 
 #[derive(Debug, Clone)]
 pub struct Logger {
+    // to dublicate messages to table so they will be displayed
     table_sender: Option<Sender<UIMessage>>,
     log_path: String,
 }
 
 macro_rules! log {
-    ($a:expr,$($c:tt)*) => {{
+    ($a:expr,$($b:tt)*) => {{
         crate::logger::Logger::global()
-            .add_log($a, format!($($c)*).as_str());
+            .add_log($a, format!($($b)*).as_str());
     }
     };
 }
@@ -36,7 +36,6 @@ impl std::fmt::Display for LogLevel {
         write!(f, "{:?}", self)
     }
 }
-
 
 impl Logger {
     pub fn global() -> &'static Logger {
@@ -58,8 +57,8 @@ impl Logger {
     pub fn add_log(&self, log_level: LogLevel, msg: &str) {
         let timestamp = chrono::Local::now().format("[%d/%m/%Y %H:%M:%S]");
         let mut log_file = OpenOptions::new()
-            .append(true)
             .create(true)
+            .append(true)
             .open(self.log_path.as_str())
             .expect("cannot open log file");
 
@@ -74,11 +73,10 @@ impl Logger {
                 } else {
                     println!("{}", msg);
                 }
-                
             }
             LogLevel::Info => {
                 if let Some(sender) = &self.table_sender {
-                let _ = sender.try_send(UIMessage::InfoLog(msg.to_string()));
+                    let _ = sender.try_send(UIMessage::InfoLog(msg.to_string()));
                 } else {
                     println!("{}", msg);
                 }
